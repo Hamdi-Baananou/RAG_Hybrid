@@ -4,7 +4,7 @@ import json
 from typing import List, Dict, Any
 from langchain_community.graphs import Neo4jGraph
 from langchain.vectorstores.neo4j_vector import Neo4jVector
-from mistralai.client import MistralClient
+from mistralai import Mistral
 from utils.logging_config import logger
 
 def extract_entities_from_question(question: str) -> List[str]:
@@ -157,11 +157,11 @@ def answer_question(
 
         Include references to document sources when possible. Be precise and concise."""
 
-        # Initialize Mistral client
-        mistral_client = MistralClient(api_key=api_key)
+        # Initialize Mistral client - UPDATED FOR v1.0.0
+        mistral_client = Mistral(api_key=api_key)
 
-        # Send request to Mistral API
-        response = mistral_client.chat(
+        # Send request to Mistral API - UPDATED FOR v1.0.0
+        response = mistral_client.chat.complete(
             model="mistral-large-latest",
             messages=[{"role": "user", "content": prompt}],
             max_tokens=1024,

@@ -5,7 +5,7 @@ from langchain.docstore.document import Document
 import json
 import re
 from typing import List, Dict, Any
-from mistralai.client import MistralClient
+from mistralai import Mistral
 
 from utils.logging_config import logger
 
@@ -114,8 +114,8 @@ def create_knowledge_graph(
             }
             graph.query(query, params=params)
 
-        # Setup Mistral for entity extraction
-        mistral_client = MistralClient(api_key=api_key)
+        # Setup Mistral for entity extraction - UPDATED FOR v1.0.0
+        mistral_client = Mistral(api_key=api_key)
 
         # Process each chunk
         for i, chunk in enumerate(chunks):
@@ -140,7 +140,8 @@ def create_knowledge_graph(
                 JSON RESPONSE:
                 """
 
-                entity_response = mistral_client.chat(
+                # UPDATED: Using the new API structure
+                entity_response = mistral_client.chat.complete(
                     model="mistral-large-latest",
                     messages=[{"role": "user", "content": entity_prompt}],
                     max_tokens=1024,
