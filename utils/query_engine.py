@@ -162,7 +162,7 @@ def answer_question(
 
         # Send request to Mistral API - UPDATED FOR v1.0.0
         response = mistral_client.chat.complete(
-            model="mistral-large-latest",
+            model="mistral-small-latest",
             messages=[{"role": "user", "content": prompt}],
             max_tokens=1024,
             temperature=0.3

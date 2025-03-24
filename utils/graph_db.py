@@ -142,7 +142,7 @@ def create_knowledge_graph(
 
                 # UPDATED: Using the new API structure
                 entity_response = mistral_client.chat.complete(
-                    model="mistral-large-latest",
+                    model="mistral-small-latest",
                     messages=[{"role": "user", "content": entity_prompt}],
                     max_tokens=1024,
                     temperature=0.1
