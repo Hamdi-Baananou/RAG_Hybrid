@@ -312,4 +312,26 @@ def get_graph_statistics(graph: Neo4jGraph) -> Dict[str, int]:
             "chunks": 0,
             "entities": 0,
             "relationships": 0
-        } 
+        }
+
+def reset_neo4j_database(graph: Neo4jGraph) -> None:
+    """Reset the Neo4j database by deleting all nodes and relationships
+    
+    Args:
+        graph: Neo4jGraph object with active connection
+    """
+    logger.info("Resetting Neo4j database - deleting all nodes and relationships")
+    try:
+        # Delete all nodes and relationships
+        query = "MATCH (n) DETACH DELETE n"
+        graph.query(query)
+        
+        # Verify database is empty
+        result = graph.query("MATCH (n) RETURN count(n) as count")
+        node_count = result[0]['count']
+        
+        logger.info(f"Database reset complete. Database now has {node_count} nodes")
+        
+    except Exception as e:
+        logger.error(f"Failed to reset Neo4j database: {str(e)}", exc_info=True)
+        raise 
