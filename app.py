@@ -23,6 +23,13 @@ from utils.query_engine import (
     answer_question
 )
 
+# Import components
+from components.results import (
+    display_processing_status,
+    display_file_info,
+    display_graph_stats
+)
+
 # Import prompts
 from prompts.extraction_prompts import (
     MATERIAL_PROMPT,
@@ -30,13 +37,8 @@ from prompts.extraction_prompts import (
     GENDER_PROMPT
 )
 
-# Import components
-from components.results import (
-    display_processing_status,
-    display_file_info,
-    display_graph_stats,
-    display_extraction_table
-)
+# Initialize dotenv for environment variables
+load_dotenv()
 
 # Initialize session state if not already done
 if 'graph_data' not in st.session_state:
@@ -47,9 +49,6 @@ if 'extraction_results' not in st.session_state:
 
 if 'processing_complete' not in st.session_state:
     st.session_state.processing_complete = False
-
-# Initialize dotenv for environment variables
-load_dotenv()
 
 def process_files_and_build_graph(
     pdf_paths: List[str], 
