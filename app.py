@@ -4,6 +4,7 @@ import time
 from typing import Dict, Any, List, Optional
 import tempfile
 import concurrent.futures
+from dotenv import load_dotenv
 
 # Import utility modules
 from utils.logging_config import logger
@@ -46,6 +47,9 @@ if 'extraction_results' not in st.session_state:
 
 if 'processing_complete' not in st.session_state:
     st.session_state.processing_complete = False
+
+# Initialize dotenv for environment variables
+load_dotenv()
 
 def process_files_and_build_graph(
     pdf_paths: List[str], 
@@ -294,17 +298,15 @@ def main():
     # Get configuration from environment variables or secrets
     neo4j_uri = os.environ.get("NEO4J_URI", "neo4j://localhost:7687")
     neo4j_username = os.environ.get("NEO4J_USERNAME", "neo4j")
+    neo4j_password = os.environ.get("NEO4J_PASSWORD", "")
+    mistral_api_key = os.environ.get("MISTRAL_API_KEY", "")
     
-    # Use Streamlit secrets for sensitive info if available, otherwise fallback to env vars
-    if hasattr(st, "secrets") and "neo4j_password" in st.secrets:
-        neo4j_password = st.secrets["neo4j_password"]
-    else:
-        neo4j_password = os.environ.get("NEO4J_PASSWORD", "")
-        
-    if hasattr(st, "secrets") and "mistral_api_key" in st.secrets:
-        mistral_api_key = st.secrets["mistral_api_key"]
-    else:
-        mistral_api_key = os.environ.get("MISTRAL_API_KEY", "")
+    # Use Streamlit secrets for sensitive info if available
+    if hasattr(st, "secrets"):
+        if "neo4j_password" in st.secrets:
+            neo4j_password = st.secrets["neo4j_password"]
+        if "mistral_api_key" in st.secrets:
+            mistral_api_key = st.secrets["mistral_api_key"]
     
     # Always reset the database
     reset_db = True
