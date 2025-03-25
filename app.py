@@ -345,7 +345,7 @@ def main():
             st.write("4. Display the results in a table")
             
             # Show example image or placeholder
-            st.image("https://via.placeholder.com/800x400?text=Upload+Documents+to+Start", use_column_width=True)
+            st.image("https://via.placeholder.com/800x400?text=Upload+Documents+to+Start", use_container_width=True)
     
     # Process files if button clicked
     if process_button:
