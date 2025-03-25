@@ -3,6 +3,7 @@ import os
 import time
 from typing import Dict, Any, List, Optional
 import tempfile
+import concurrent.futures
 
 # Import utility modules
 from utils.logging_config import logger
@@ -43,17 +44,11 @@ from components.results import (
 if 'graph_data' not in st.session_state:
     st.session_state.graph_data = None
 
-if 'last_question' not in st.session_state:
-    st.session_state.last_question = None
+if 'extraction_results' not in st.session_state:
+    st.session_state.extraction_results = {}
 
-if 'last_answer' not in st.session_state:
-    st.session_state.last_answer = None
-
-if 'last_extraction' not in st.session_state:
-    st.session_state.last_extraction = None
-
-if 'last_extraction_result' not in st.session_state:
-    st.session_state.last_extraction_result = None
+if 'processing_complete' not in st.session_state:
+    st.session_state.processing_complete = False
 
 def process_files_and_build_graph(
     pdf_paths: List[str], 
@@ -209,117 +204,193 @@ def run_extraction(
         else:
             raise ValueError(f"Unknown extraction option: {extraction_option}")
 
-        # Display processing status
-        with st.spinner(f"Running {extraction_option} extraction..."):
-            # Use the same Q&A function but with the extraction prompt
-            result = ask_graph_rag(prompt, api_key, graph_data)
-            return result
+        # Use the same Q&A function but with the extraction prompt
+        result = ask_graph_rag(prompt, api_key, graph_data)
+        return result
 
     except Exception as e:
         logger.error(f"Error in extraction pipeline: {str(e)}", exc_info=True)
         return {"error": f"Error running extraction: {str(e)}"}
 
+def run_all_extractions(api_key: str, graph_data: Dict[str, Any]) -> Dict[str, Dict[str, Any]]:
+    """Run all extraction types in parallel
+    
+    Args:
+        api_key: Mistral API key
+        graph_data: Graph data dictionary
+        
+    Returns:
+        Dictionary of extraction results by type
+    """
+    extraction_types = ["Material Filling", "Material Name", "Connector Gender"]
+    results = {}
+    
+    with st.status("Running extractions...", expanded=True) as status:
+        # Use ThreadPoolExecutor to run extractions in parallel
+        with concurrent.futures.ThreadPoolExecutor() as executor:
+            # Create a future for each extraction type
+            future_to_extraction = {
+                executor.submit(run_extraction, extraction_type, api_key, graph_data): extraction_type
+                for extraction_type in extraction_types
+            }
+            
+            # Process results as they complete
+            for i, future in enumerate(concurrent.futures.as_completed(future_to_extraction)):
+                extraction_type = future_to_extraction[future]
+                st.write(f"Completed {extraction_type} extraction ({i+1}/{len(extraction_types)})")
+                try:
+                    result = future.result()
+                    results[extraction_type] = result
+                except Exception as e:
+                    logger.error(f"Error in {extraction_type} extraction: {str(e)}", exc_info=True)
+                    results[extraction_type] = {"error": str(e)}
+        
+        status.update(label="All extractions complete!", state="complete")
+    
+    return results
+
+def display_extraction_table(extraction_results: Dict[str, Dict[str, Any]]):
+    """Display all extraction results in a table format
+    
+    Args:
+        extraction_results: Dictionary of extraction results by type
+    """
+    st.subheader("📊 Extraction Results")
+    
+    if not extraction_results:
+        st.info("No extraction results available")
+        return
+    
+    # Create a table for the results
+    table_data = []
+    
+    for extraction_type, result in extraction_results.items():
+        if "error" in result:
+            table_data.append({
+                "Extraction Type": extraction_type,
+                "Status": "❌ Error",
+                "Result": result["error"]
+            })
+        else:
+            # Get the answer from the result
+            answer = result.get("answer", "No result")
+            table_data.append({
+                "Extraction Type": extraction_type,
+                "Status": "✅ Success",
+                "Result": answer
+            })
+    
+    # Display as DataFrame
+    import pandas as pd
+    df = pd.DataFrame(table_data)
+    st.dataframe(df, use_container_width=True)
+
 def main():
     """Main application entry point"""
     # Set page configuration
     st.set_page_config(
-        page_title="Graph RAG PDF Analysis",
-        page_icon="📊",
+        page_title="Document Analysis Tool",
+        page_icon="📄",
         layout="wide",
-        initial_sidebar_state="expanded"
+        initial_sidebar_state="collapsed"
     )
     
-    # Create sidebar and get configurations
-    sidebar_config = create_sidebar()
-
+    # Create sidebar with simplified options
+    st.sidebar.title("Configuration")
+    
+    # File upload section
+    pdf_files = st.sidebar.file_uploader(
+        "Upload PDF Documents", 
+        type="pdf", 
+        accept_multiple_files=True,
+        help="Upload one or more PDF files for analysis"
+    )
+    
+    # Save uploaded files to temp directory
+    pdf_paths = []
+    if pdf_files:
+        temp_dir = tempfile.mkdtemp()
+        for pdf_file in pdf_files:
+            temp_path = os.path.join(temp_dir, pdf_file.name)
+            with open(temp_path, "wb") as f:
+                f.write(pdf_file.getvalue())
+            pdf_paths.append(temp_path)
+    
+    # Neo4j connection settings
+    st.sidebar.subheader("Neo4j Connection")
+    neo4j_uri = st.sidebar.text_input("Neo4j URI", value="neo4j://localhost:7687")
+    neo4j_username = st.sidebar.text_input("Neo4j Username", value="neo4j")
+    neo4j_password = st.sidebar.text_input("Neo4j Password", type="password")
+    
+    # API key input
+    st.sidebar.subheader("API Key")
+    mistral_api_key = st.sidebar.text_input("Mistral API Key", type="password")
+    
+    # Reset database option
+    reset_db = st.sidebar.checkbox("Reset database before processing", value=True)
+    
+    # Process button
+    process_button = st.sidebar.button("Process Documents", type="primary", use_container_width=True)
+    
     # Main content area
-    st.title("📊 Graph RAG PDF Analysis")
+    st.title("📄 Document Analysis Tool")
+    
+    # Initial state - just show upload instructions
+    if not st.session_state.processing_complete and not process_button:
+        st.info("👈 Start by uploading your documents in the sidebar")
+        st.write("This tool will:")
+        st.write("1. Process your PDF documents")
+        st.write("2. Build a knowledge graph")
+        st.write("3. Automatically extract key information")
+        st.write("4. Display the results in a table")
+        
+        # Show example image or placeholder
+        if not pdf_paths:
+            st.image("https://via.placeholder.com/800x400?text=Upload+Documents+to+Start", use_column_width=True)
     
     # Process files if button clicked
-    if sidebar_config["process_button"]:
-        if not sidebar_config["pdf_paths"]:
-            st.warning("Please upload PDF files first")
-        elif not sidebar_config["neo4j_uri"] or not sidebar_config["neo4j_username"] or not sidebar_config["neo4j_password"]:
-            st.warning("Please provide Neo4j connection details")
-        elif not sidebar_config["mistral_api_key"]:
-            st.warning("Please provide a Mistral API key")
+    if process_button:
+        if not pdf_paths:
+            st.warning("⚠️ Please upload PDF files first")
+        elif not neo4j_uri or not neo4j_username or not neo4j_password:
+            st.warning("⚠️ Please provide Neo4j connection details")
+        elif not mistral_api_key:
+            st.warning("⚠️ Please provide a Mistral API key")
         else:
             # Process the files and build graph
-            st.session_state.graph_data = process_files_and_build_graph(
-                sidebar_config["pdf_paths"],
-                sidebar_config["neo4j_uri"],
-                sidebar_config["neo4j_username"],
-                sidebar_config["neo4j_password"],
-                sidebar_config["mistral_api_key"],
-                sidebar_config["reset_db"]
-            )
+            with st.container():
+                st.subheader("🔄 Processing Documents")
+                st.session_state.graph_data = process_files_and_build_graph(
+                    pdf_paths,
+                    neo4j_uri,
+                    neo4j_username,
+                    neo4j_password,
+                    mistral_api_key,
+                    reset_db
+                )
+                
+                if st.session_state.graph_data:
+                    # Run all extractions automatically
+                    st.subheader("🔍 Running Information Extraction")
+                    st.session_state.extraction_results = run_all_extractions(
+                        mistral_api_key,
+                        st.session_state.graph_data
+                    )
+                    st.session_state.processing_complete = True
     
-    # Show file information
-    display_file_info(sidebar_config["pdf_paths"])
+    # Show file information if files are uploaded
+    if pdf_paths:
+        with st.expander("📁 Uploaded Documents", expanded=True):
+            display_file_info(pdf_paths)
     
     # Show graph statistics if available
     if st.session_state.graph_data:
-        display_graph_stats(st.session_state.graph_data["statistics"])
+        with st.expander("📊 Graph Statistics", expanded=True):
+            display_graph_stats(st.session_state.graph_data["statistics"])
     
-    # Create two tabs for Q&A and Visualization
-    tab1, tab2 = st.tabs(["Question Answering", "Graph Visualization"])
-    
-    with tab1:
-        st.subheader("🔎 Ask Questions About Your Documents")
-        
-        # Text input for questions
-        question = st.text_input("Enter your question:")
-        
-        col1, col2 = st.columns([1, 4])
-        
-        with col1:
-            ask_button = st.button("Ask Question", type="primary", use_container_width=True)
-        
-        with col2:
-            if ask_button and question:
-                if not st.session_state.graph_data:
-                    st.warning("Please process PDF files first")
-                elif not sidebar_config["mistral_api_key"]:
-                    st.warning("Please provide a Mistral API key")
-                else:
-                    # Send question to the graph RAG system
-                    st.session_state.last_question = question
-                    st.session_state.last_answer = ask_graph_rag(
-                        question,
-                        sidebar_config["mistral_api_key"],
-                        st.session_state.graph_data
-                    )
-        
-        # Display the last answer if available
-        if st.session_state.last_question and st.session_state.last_answer:
-            display_answer(st.session_state.last_answer, st.session_state.last_question)
-        
-        # Run extraction if button clicked
-        if sidebar_config["run_extraction"]:
-            if not st.session_state.graph_data:
-                st.warning("Please process PDF files first")
-            elif not sidebar_config["mistral_api_key"]:
-                st.warning("Please provide a Mistral API key")
-            else:
-                st.session_state.last_extraction = sidebar_config["extraction_option"]
-                st.session_state.last_extraction_result = run_extraction(
-                    sidebar_config["extraction_option"],
-                    sidebar_config["mistral_api_key"],
-                    st.session_state.graph_data
-                )
-        
-        # Display the last extraction result if available
-        if st.session_state.last_extraction and st.session_state.last_extraction_result:
-            display_extraction_results(
-                st.session_state.last_extraction_result,
-                st.session_state.last_extraction
-            )
-    
-    with tab2:
-        if st.session_state.graph_data:
-            display_visualization(st.session_state.graph_data)
-        else:
-            st.info("Process documents first to see the knowledge graph visualization")
+    # Display extraction results if available
+    if st.session_state.processing_complete and st.session_state.extraction_results:
+        display_extraction_table(st.session_state.extraction_results)
 
 if __name__ == "__main__":
     main() 
