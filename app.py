@@ -13,7 +13,8 @@ from utils.graph_db import (
     setup_neo4j_schema, 
     create_knowledge_graph, 
     setup_vector_index,
-    get_graph_statistics
+    get_graph_statistics,
+    reset_neo4j_database
 )
 from utils.query_engine import (
     get_query_context,
@@ -59,7 +60,8 @@ def process_files_and_build_graph(
     neo4j_uri: str, 
     neo4j_username: str, 
     neo4j_password: str, 
-    api_key: str
+    api_key: str,
+    reset_db: bool = False
 ) -> Dict[str, Any]:
     """Process PDF files and build the knowledge graph
     
@@ -69,6 +71,7 @@ def process_files_and_build_graph(
         neo4j_username: Neo4j username
         neo4j_password: Neo4j password
         api_key: Mistral API key
+        reset_db: Whether to reset the database before processing
         
     Returns:
         Dictionary with graph data and metadata
@@ -85,6 +88,12 @@ def process_files_and_build_graph(
         # Step 2: Connect to Neo4j
         display_processing_status("Connecting to Neo4j and setting up schema...", 0.2)
         graph = connect_to_neo4j(neo4j_uri, neo4j_username, neo4j_password)
+        
+        # Reset database if option is selected
+        if reset_db:
+            display_processing_status("Resetting Neo4j database...", 0.25)
+            reset_neo4j_database(graph)
+            
         setup_neo4j_schema(graph)
 
         # Step 3: Initialize embedding model
@@ -241,7 +250,8 @@ def main():
                 sidebar_config["neo4j_uri"],
                 sidebar_config["neo4j_username"],
                 sidebar_config["neo4j_password"],
-                sidebar_config["mistral_api_key"]
+                sidebar_config["mistral_api_key"],
+                sidebar_config["reset_db"]
             )
     
     # Show file information

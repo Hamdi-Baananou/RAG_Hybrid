@@ -122,6 +122,10 @@ def create_sidebar() -> Dict[str, Any]:
         """
     )
     
+    # Add a reset database checkbox to your sidebar function
+    reset_db = st.sidebar.checkbox("Reset database before processing", value=False, 
+                                  help="Check this to clear all existing data in the Neo4j database before processing files")
+    
     # Return all the sidebar configurations
     return {
         "neo4j_uri": neo4j_uri,
@@ -131,5 +135,6 @@ def create_sidebar() -> Dict[str, Any]:
         "pdf_paths": pdf_paths,
         "process_button": process_button,
         "extraction_option": extraction_option,
-        "run_extraction": run_extraction
+        "run_extraction": run_extraction,
+        "reset_db": reset_db
     } 
