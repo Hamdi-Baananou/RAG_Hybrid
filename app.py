@@ -30,14 +30,11 @@ from prompts.extraction_prompts import (
 )
 
 # Import components
-from components.sidebar import create_sidebar
 from components.results import (
     display_processing_status,
     display_file_info,
     display_graph_stats,
-    display_answer,
-    display_extraction_results,
-    display_visualization
+    display_extraction_table
 )
 
 # Initialize session state if not already done
@@ -291,15 +288,32 @@ def main():
     st.set_page_config(
         page_title="Document Analysis Tool",
         page_icon="📄",
-        layout="wide",
-        initial_sidebar_state="collapsed"
+        layout="wide"
     )
     
-    # Create sidebar with simplified options
-    st.sidebar.title("Configuration")
+    # Get configuration from environment variables or secrets
+    neo4j_uri = os.environ.get("NEO4J_URI", "neo4j://localhost:7687")
+    neo4j_username = os.environ.get("NEO4J_USERNAME", "neo4j")
     
-    # File upload section
-    pdf_files = st.sidebar.file_uploader(
+    # Use Streamlit secrets for sensitive info if available, otherwise fallback to env vars
+    if hasattr(st, "secrets") and "neo4j_password" in st.secrets:
+        neo4j_password = st.secrets["neo4j_password"]
+    else:
+        neo4j_password = os.environ.get("NEO4J_PASSWORD", "")
+        
+    if hasattr(st, "secrets") and "mistral_api_key" in st.secrets:
+        mistral_api_key = st.secrets["mistral_api_key"]
+    else:
+        mistral_api_key = os.environ.get("MISTRAL_API_KEY", "")
+    
+    # Always reset the database
+    reset_db = True
+    
+    # Main content area
+    st.title("📄 Document Analysis Tool")
+    
+    # File upload section - now in the main content area
+    pdf_files = st.file_uploader(
         "Upload PDF Documents", 
         type="pdf", 
         accept_multiple_files=True,
@@ -316,46 +330,26 @@ def main():
                 f.write(pdf_file.getvalue())
             pdf_paths.append(temp_path)
     
-    # Neo4j connection settings
-    st.sidebar.subheader("Neo4j Connection")
-    neo4j_uri = st.sidebar.text_input("Neo4j URI", value="neo4j://localhost:7687")
-    neo4j_username = st.sidebar.text_input("Neo4j Username", value="neo4j")
-    neo4j_password = st.sidebar.text_input("Neo4j Password", type="password")
+    # Process button - now in the main content area
+    process_button = st.button("Process Documents", type="primary", disabled=not pdf_files)
     
-    # API key input
-    st.sidebar.subheader("API Key")
-    mistral_api_key = st.sidebar.text_input("Mistral API Key", type="password")
-    
-    # Reset database option
-    reset_db = st.sidebar.checkbox("Reset database before processing", value=True)
-    
-    # Process button
-    process_button = st.sidebar.button("Process Documents", type="primary", use_container_width=True)
-    
-    # Main content area
-    st.title("📄 Document Analysis Tool")
-    
-    # Initial state - just show upload instructions
+    # Initial state instructions
     if not st.session_state.processing_complete and not process_button:
-        st.info("👈 Start by uploading your documents in the sidebar")
-        st.write("This tool will:")
-        st.write("1. Process your PDF documents")
-        st.write("2. Build a knowledge graph")
-        st.write("3. Automatically extract key information")
-        st.write("4. Display the results in a table")
-        
-        # Show example image or placeholder
-        if not pdf_paths:
+        if not pdf_files:
+            st.info("Start by uploading your documents above")
+            st.write("This tool will:")
+            st.write("1. Process your PDF documents")
+            st.write("2. Build a knowledge graph")
+            st.write("3. Automatically extract key information")
+            st.write("4. Display the results in a table")
+            
+            # Show example image or placeholder
             st.image("https://via.placeholder.com/800x400?text=Upload+Documents+to+Start", use_column_width=True)
     
     # Process files if button clicked
     if process_button:
         if not pdf_paths:
             st.warning("⚠️ Please upload PDF files first")
-        elif not neo4j_uri or not neo4j_username or not neo4j_password:
-            st.warning("⚠️ Please provide Neo4j connection details")
-        elif not mistral_api_key:
-            st.warning("⚠️ Please provide a Mistral API key")
         else:
             # Process the files and build graph
             with st.container():
