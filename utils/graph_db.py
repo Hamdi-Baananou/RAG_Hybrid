@@ -116,6 +116,9 @@ def create_knowledge_graph(
 
         # Setup Mistral for entity extraction - UPDATED FOR v1.0.0
         mistral_client = Mistral(api_key=api_key)
+        
+        # Track last API call time for rate limiting
+        last_api_call_time = 0
 
         # Process each chunk
         for i, chunk in enumerate(chunks):
@@ -140,6 +143,14 @@ def create_knowledge_graph(
                 JSON RESPONSE:
                 """
 
+                # Implement rate limiting for Mistral API (1 request per second)
+                current_time = time.time()
+                time_since_last_call = current_time - last_api_call_time
+                if time_since_last_call < 1.0:
+                    sleep_time = 1.0 - time_since_last_call
+                    logger.debug(f"Rate limiting: Sleeping for {sleep_time:.2f} seconds")
+                    time.sleep(sleep_time)
+                
                 # UPDATED: Using the new API structure
                 entity_response = mistral_client.chat.complete(
                     model="mistral-small-latest",
@@ -147,6 +158,7 @@ def create_knowledge_graph(
                     max_tokens=1024,
                     temperature=0.1
                 )
+                last_api_call_time = time.time()  # Update the last API call time
 
                 # Parse the JSON response
                 try:
