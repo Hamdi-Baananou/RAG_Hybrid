@@ -550,44 +550,46 @@ def setup_vector_index(
 
         logger.info(f"Attempting to create/update vector index '{index_name}' with {len(valid_chunks)} valid chunks.")
 
-        # Neo4jVector.from_documents expects metadata to link implicitly or requires explicit mapping.
-        # It usually MERGEs nodes based on the `text_node_property` and adds the embedding.
-        # To link to *existing* nodes created earlier, we might need `from_existing_graph`.
-        # Let's try `from_documents` first, assuming it updates existing nodes if found by ID.
-        # We need to ensure the `chunk_id` used earlier matches what `from_documents` uses.
-        # It might implicitly use the text content or require an 'id' field in metadata.
-
         # Prepare documents with 'id' in metadata for potential matching by Neo4jVector
-        # Note: This modifies the metadata in the list, not the original objects
         documents_for_vector = []
         for doc in valid_chunks:
              new_meta = doc.metadata.copy()
              new_meta['id'] = doc.metadata['chunk_id'] # Explicitly add 'id' key
              documents_for_vector.append(Document(page_content=doc.page_content, metadata=new_meta))
 
-
-        # Use from_documents - This might create duplicate nodes if matching isn't perfect.
-        # vector_index = Neo4jVector.from_documents(
-        #     documents=documents_for_vector, # Use docs with 'id' in metadata
-        #     embedding=embedding_function,
-        #     url=neo4j_uri,
-        #     username=neo4j_username,
-        #     password=neo4j_password,
-        #     index_name=index_name,
-        #     node_label=node_label,
-        #     text_node_property=text_property, # The property containing the text
-        #     embedding_node_property=embedding_property, # The property to store the embedding
-        #     # By default, from_documents creates NEW nodes. We need it to update existing ones.
-        #     # This might require `from_existing_graph` or careful use of `ids` parameter if available.
-        #     # Check Langchain documentation for the best way to add embeddings to existing nodes.
-        # )
-
-        # Alternative: Add embeddings manually or use a method designed for existing nodes
-        # Let's assume Neo4jVector can update if the index/constraints are set up.
-        # If `from_documents` creates duplicates, manual updates might be needed:
-        # 1. Get embeddings for all texts.
-        # 2. Loop through chunks and embeddings.
-        # 3. Use graph.query to MERGE the Chunk node by ID and SET the embedding property.
+        # Initialize Neo4j connection directly to set up vector index
+        logger.info("Creating vector index directly via Neo4j query if it doesn't exist...")
+        with Neo4jGraph(url=neo4j_uri, username=neo4j_username, password=neo4j_password) as direct_graph:
+            # Check if the index exists
+            index_check_query = """
+            SHOW INDEXES YIELD name, type
+            WHERE name = $index_name
+            RETURN count(*) > 0 as exists
+            """
+            result = direct_graph.query(index_check_query, params={"index_name": index_name})
+            index_exists = result[0]['exists'] if result else False
+            
+            if not index_exists:
+                try:
+                    # Create the vector index using direct Cypher query
+                    # This is the Neo4j 5.x syntax for vector indexes
+                    vector_index_query = f"""
+                    CALL db.index.vector.createNodeIndex(
+                      '{index_name}',
+                      '{node_label}',
+                      '{embedding_property}',
+                      1536,
+                      'cosine'
+                    )
+                    """
+                    direct_graph.query(vector_index_query)
+                    logger.info(f"Vector index '{index_name}' created successfully")
+                except Exception as e:
+                    # If the newer syntax fails, try alternative syntax or handle error
+                    logger.error(f"Failed to create vector index with Neo4j 5.x syntax: {e}")
+                    logger.info("Continuing with the expectation that Neo4jVector will handle index creation")
+            else:
+                logger.info(f"Vector index '{index_name}' already exists")
 
         logger.info("Initializing Neo4jVector store...")
         # Try initializing the store object first
@@ -603,16 +605,10 @@ def setup_vector_index(
              # retrieval_query=... # Optional: define custom retrieval query
         )
 
-        # Explicitly create the index if it doesn't exist
-        logger.info(f"Ensuring vector index '{index_name}' exists...")
-        vector_store.create_vector_index(index_name, node_label, embedding_property)
-
-
         logger.info(f"Adding/updating embeddings for {len(documents_for_vector)} chunks...")
         # Use add_documents which is generally better for adding to an existing index/graph structure
         # It should use the 'id' from metadata to match nodes if configured correctly.
         vector_store.add_documents(documents_for_vector, ids=[doc.metadata['id'] for doc in documents_for_vector])
-
 
         logger.info(f"Vector index '{index_name}' setup completed for {node_label} nodes in {time.time() - start_time:.2f} seconds.")
         return vector_store # Return the initialized store object
