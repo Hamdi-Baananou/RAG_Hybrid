@@ -187,7 +187,8 @@ def _create_chunk_and_entities_tx(tx, chunk_id, source_doc_id, content, page_num
 
         entity_query = """
         UNWIND $entities as entity_data // $entities should be the list of dicts [{name:x, type:y}, ...]
-        // Minimal validation (already done partly in Python, but good practice)
+        // Add WITH clause before WHERE to fix syntax error
+        WITH entity_data
         WHERE entity_data.name IS NOT NULL AND entity_data.type IS NOT NULL AND trim(entity_data.name) <> ""
 
         // Create a more robust, case-insensitive ID using APOC if available, otherwise simple concatenation
