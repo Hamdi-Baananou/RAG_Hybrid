@@ -166,7 +166,7 @@ def create_knowledge_graph(
 
         # Reduce max_concurrent_requests to be safer with rate limits
         # Start lower (e.g., 5-8) and increase if stable
-        max_concurrent_requests = 8 # ADJUST THIS based on testing and Fireworks plan
+        max_concurrent_requests = 5 # ADJUST THIS based on testing and Fireworks plan
         logger.info(f"Using max_concurrent_requests: {max_concurrent_requests}")
 
         lock = Lock()
@@ -253,7 +253,7 @@ def create_knowledge_graph(
 
             try:
                 # Use a single transaction for chunk + entities for atomicity
-                with graph.driver.session() as session:
+                with graph._driver.session() as session:
                     session.execute_write(
                         _create_chunk_and_entities_tx,
                         chunk_id, source_doc_id, content, page_num, entities
