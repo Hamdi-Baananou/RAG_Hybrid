@@ -75,28 +75,54 @@ def setup_neo4j_schema(graph: Neo4jGraph) -> None:
                      # Decide if you want to raise the error or continue
 
         # Create indexes (Ensure they target correct properties)
-        indexes = [
+        # For Neo4j 4.x+ the syntax is different for fulltext indexes
+        basic_indexes = [
             # Vector index is created separately by Neo4jVector
             "CREATE INDEX document_source_idx IF NOT EXISTS FOR (d:Document) ON (d.id)", # Index on the unique ID is good
-            "CREATE FULLTEXT INDEX chunk_content_fulltext_idx IF NOT EXISTS FOR (c:Chunk) ON (c.content)", # Use FULLTEXT for text search
             "CREATE INDEX entity_name_idx IF NOT EXISTS FOR (e:Entity) ON (e.name)", # Index entity names
             "CREATE INDEX entity_type_idx IF NOT EXISTS FOR (e:Entity) ON (e.type)", # Index entity types
         ]
 
-        for index in indexes:
+        # Try creating basic indexes first
+        for index in basic_indexes:
             try:
                 graph.query(index)
                 logger.debug(f"Ensured index exists: {index.split(' IF NOT EXISTS')[0]}")
             except Exception as e:
-                # Neo.ClientError.Schema.IndexAlreadyExists
                 if "already exists" in str(e).lower() or (hasattr(e, 'code') and "IndexAlreadyExists" in e.code):
                     logger.warning(f"Index likely already exists (this is expected): {index.split(' IF NOT EXISTS')[0]}")
-                # Handle specific error for fulltext index on non-string property if c.content is not always string
-                elif "fulltext index can only be created on string" in str(e).lower():
-                     logger.error(f"Cannot create fulltext index on Chunk.content. Ensure it's always a string property. Index: {index}")
                 else:
                     logger.error(f"Failed to create index: {index} - {str(e)}", exc_info=True)
-                    # Decide if you want to raise the error or continue
+
+        # Now try creating fulltext index with appropriate syntax for different Neo4j versions
+        try:
+            # First try Neo4j 4.x+ syntax for fulltext index
+            fulltext_query = """
+            CALL db.index.fulltext.createNodeIndex(
+                'chunk_content_fulltext_idx',  // index name
+                ['Chunk'],                     // node labels
+                ['content'],                   // property names
+                {eventually_consistent: 'true'} // optional config
+            )
+            """
+            graph.query(fulltext_query)
+            logger.debug("Created fulltext index 'chunk_content_fulltext_idx' on Chunk.content (Neo4j 4.x syntax)")
+        except Exception as e1:
+            if "already exists" in str(e1).lower():
+                logger.warning("Fulltext index 'chunk_content_fulltext_idx' already exists.")
+            else:
+                # Try alternative syntax (Neo4j 3.5 or legacy)
+                try:
+                    alt_fulltext_query = """
+                    CREATE FULLTEXT INDEX chunk_content_fulltext_idx 
+                    FOR (n:Chunk) 
+                    ON EACH [n.content]
+                    """
+                    graph.query(alt_fulltext_query)
+                    logger.debug("Created fulltext index 'chunk_content_fulltext_idx' on Chunk.content (legacy syntax)")
+                except Exception as e2:
+                    logger.error(f"Could not create fulltext index with any syntax: {str(e1)} / {str(e2)}", exc_info=True)
+                    # Continue without fulltext index - not critical for basic operations
 
         logger.info("Neo4j schema setup completed")
     except Exception as e:
