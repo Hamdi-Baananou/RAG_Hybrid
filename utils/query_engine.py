@@ -162,7 +162,7 @@ def answer_question(
 
         # Send request to Fireworks API
         response = fw.ChatCompletion.create(
-            model="accounts/fireworks/models/mistral-small-24b-instruct-2501",
+            model="accounts/fireworks/models/llama-v3p1-8b-instruct",
             messages=[{"role": "user", "content": prompt}],
             max_tokens=1024,
             temperature=0.3

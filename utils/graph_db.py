@@ -148,7 +148,7 @@ def create_knowledge_graph(
                 
                 # Using Fireworks API for completion
                 entity_response = fw.ChatCompletion.create(
-                    model="accounts/fireworks/models/mistral-small-24b-instruct-2501",
+                    model="accounts/fireworks/models/llama-v3p1-8b-instruct",
                     messages=[{"role": "user", "content": entity_prompt}],
                     max_tokens=1024,
                     temperature=0.1
