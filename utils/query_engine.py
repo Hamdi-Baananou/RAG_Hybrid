@@ -157,12 +157,12 @@ def answer_question(
 
         Include references to document sources when possible. Be precise and concise."""
 
-        # Initialize Fireworks client
-        fw.client.api_key = api_key
+        # Initialize Fireworks API key - FIXED: Using correct API key attribute
+        fw.api_key = api_key
 
         # Send request to Fireworks API
         response = fw.ChatCompletion.create(
-            model="accounts/fireworks/models/llama-v3-70b-instruct",  # Update with appropriate model
+            model="accounts/fireworks/models/mistral-small-24b-instruct-2501",
             messages=[{"role": "user", "content": prompt}],
             max_tokens=1024,
             temperature=0.3

@@ -116,8 +116,8 @@ def create_knowledge_graph(
             }
             graph.query(query, params=params)
 
-        # Setup Fireworks client
-        fw.client.api_key = api_key
+        # Setup Fireworks API key - FIXED: Using correct API key attribute
+        fw.api_key = api_key
         
         # Create a semaphore to limit concurrent API calls (adjust number as needed)
         max_concurrent_requests = 20  # Adjust based on your rate limit
@@ -129,7 +129,7 @@ def create_knowledge_graph(
         logger.info(f"Processing {len(chunks)} chunks with concurrent API calls")
         
         # Function to process a single chunk
-        def process_chunk(chunk) -> Tuple[str, str, List[Dict]]:
+        def process_chunk(chunk) -> Tuple[str, str, List[Dict], str, int]:
             chunk_id = chunk.metadata['chunk_id']
             source_doc = chunk.metadata['source_document']
             
@@ -148,7 +148,7 @@ def create_knowledge_graph(
                 
                 # Using Fireworks API for completion
                 entity_response = fw.ChatCompletion.create(
-                    model="accounts/fireworks/models/llama-v3-70b-instruct",  # Update with appropriate model
+                    model="accounts/fireworks/models/mistral-small-24b-instruct-2501",
                     messages=[{"role": "user", "content": entity_prompt}],
                     max_tokens=1024,
                     temperature=0.1
