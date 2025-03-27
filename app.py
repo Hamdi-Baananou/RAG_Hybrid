@@ -65,7 +65,7 @@ def process_files_and_build_graph(
         neo4j_uri: Neo4j connection URI
         neo4j_username: Neo4j username
         neo4j_password: Neo4j password
-        api_key: Mistral API key
+        api_key: Fireworks API key
         reset_db: Whether to reset the database before processing
         
     Returns:
@@ -134,7 +134,7 @@ def ask_graph_rag(
     
     Args:
         question: User question
-        api_key: Mistral API key
+        api_key: Fireworks API key
         graph_data: Graph data dictionary
         
     Returns:
@@ -145,7 +145,7 @@ def ask_graph_rag(
             raise ValueError("Graph data not initialized. Process PDFs first.")
 
         if not api_key:
-            raise ValueError("Missing Mistral API key")
+            raise ValueError("Missing Fireworks API key")
 
         # Display processing status
         with st.spinner("Retrieving context and generating answer..."):
@@ -181,7 +181,7 @@ def run_extraction(
     
     Args:
         extraction_option: Type of extraction to run
-        api_key: Mistral API key
+        api_key: Fireworks API key
         graph_data: Graph data dictionary
         
     Returns:
@@ -192,7 +192,7 @@ def run_extraction(
             raise ValueError("Graph data not initialized. Process PDFs first.")
 
         if not api_key:
-            raise ValueError("Missing Mistral API key")
+            raise ValueError("Missing Fireworks API key")
 
         # Select the appropriate prompt based on the extraction option
         if extraction_option == "Material Filling":
@@ -216,7 +216,7 @@ def run_all_extractions(api_key: str, graph_data: Dict[str, Any]) -> Dict[str, D
     """Run all extraction types in parallel
     
     Args:
-        api_key: Mistral API key
+        api_key: Fireworks API key
         graph_data: Graph data dictionary
         
     Returns:
@@ -298,14 +298,14 @@ def main():
     neo4j_uri = os.environ.get("NEO4J_URI", "neo4j://localhost:7687")
     neo4j_username = os.environ.get("NEO4J_USERNAME", "neo4j")
     neo4j_password = os.environ.get("NEO4J_PASSWORD", "")
-    mistral_api_key = os.environ.get("MISTRAL_API_KEY", "")
+    fireworks_api_key = os.environ.get("FIREWORKS_API_KEY", "")
     
     # Use Streamlit secrets for sensitive info if available
     if hasattr(st, "secrets"):
         if "neo4j_password" in st.secrets:
             neo4j_password = st.secrets["neo4j_password"]
-        if "mistral_api_key" in st.secrets:
-            mistral_api_key = st.secrets["mistral_api_key"]
+        if "fireworks_api_key" in st.secrets:
+            fireworks_api_key = st.secrets["fireworks_api_key"]
     
     # Always reset the database
     reset_db = True
@@ -360,7 +360,7 @@ def main():
                     neo4j_uri,
                     neo4j_username,
                     neo4j_password,
-                    mistral_api_key,
+                    fireworks_api_key,
                     reset_db
                 )
                 
@@ -368,7 +368,7 @@ def main():
                     # Run all extractions automatically
                     st.subheader("🔍 Running Information Extraction")
                     st.session_state.extraction_results = run_all_extractions(
-                        mistral_api_key,
+                        fireworks_api_key,
                         st.session_state.graph_data
                     )
                     st.session_state.processing_complete = True

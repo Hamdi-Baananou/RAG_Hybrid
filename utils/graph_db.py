@@ -4,8 +4,10 @@ from langchain.vectorstores.neo4j_vector import Neo4jVector
 from langchain.docstore.document import Document
 import json
 import re
-from typing import List, Dict, Any
-from mistralai import Mistral
+from typing import List, Dict, Any, Tuple
+import fireworks.client as fw
+import concurrent.futures
+from threading import Lock
 
 from utils.logging_config import logger
 
@@ -91,7 +93,7 @@ def create_knowledge_graph(
         graph: Neo4jGraph object with active connection
         chunks: List of document chunks
         source_metadata: Dictionary with source document metadata
-        api_key: Mistral API key for entity extraction
+        api_key: Fireworks API key for entity extraction
     """
     logger.info("Starting knowledge graph creation")
     try:
@@ -114,25 +116,26 @@ def create_knowledge_graph(
             }
             graph.query(query, params=params)
 
-        # Setup Mistral for entity extraction - UPDATED FOR v1.0.0
-        mistral_client = Mistral(api_key=api_key)
+        # Setup Fireworks client
+        fw.client.api_key = api_key
         
-        # Track last API call time for rate limiting
-        last_api_call_time = 0
-
-        # Process each chunk
-        for i, chunk in enumerate(chunks):
-            if i % 10 == 0:
-                logger.info(f"Processing chunk {i+1}/{len(chunks)}")
-
-            # Create chunk node
+        # Create a semaphore to limit concurrent API calls (adjust number as needed)
+        max_concurrent_requests = 20  # Adjust based on your rate limit
+        
+        # Create a lock for thread-safe operations
+        lock = Lock()
+        
+        # Process chunks in parallel
+        logger.info(f"Processing {len(chunks)} chunks with concurrent API calls")
+        
+        # Function to process a single chunk
+        def process_chunk(chunk) -> Tuple[str, str, List[Dict]]:
             chunk_id = chunk.metadata['chunk_id']
             source_doc = chunk.metadata['source_document']
-
-            # Process chunk to extract entities
+            
             try:
                 logger.debug(f"Extracting entities from chunk {chunk_id}")
-
+                
                 entity_prompt = f"""
                 Extract all important named entities, concepts, and topics from this text.
                 Return them as a JSON list of objects with "type" and "name" properties.
@@ -142,100 +145,128 @@ def create_knowledge_graph(
 
                 JSON RESPONSE:
                 """
-
-                # Implement rate limiting for Mistral API (1 request per second)
-                current_time = time.time()
-                time_since_last_call = current_time - last_api_call_time
-                if time_since_last_call < 1.0:
-                    sleep_time = 1.0 - time_since_last_call
-                    logger.debug(f"Rate limiting: Sleeping for {sleep_time:.2f} seconds")
-                    time.sleep(sleep_time)
                 
-                # UPDATED: Using the new API structure
-                entity_response = mistral_client.chat.complete(
-                    model="mistral-small-latest",
+                # Using Fireworks API for completion
+                entity_response = fw.ChatCompletion.create(
+                    model="accounts/fireworks/models/llama-v3-70b-instruct",  # Update with appropriate model
                     messages=[{"role": "user", "content": entity_prompt}],
                     max_tokens=1024,
                     temperature=0.1
                 )
-                last_api_call_time = time.time()  # Update the last API call time
-
+                
+                # Extract content from Fireworks response format
+                response_content = entity_response.choices[0].message.content
+                
                 # Parse the JSON response
+                entities = []
                 try:
                     # Find JSON in the response using regex
-                    json_match = re.search(r'\[.*\]', entity_response.choices[0].message.content, re.DOTALL)
+                    json_match = re.search(r'\[.*\]', response_content, re.DOTALL)
                     if json_match:
                         entities = json.loads(json_match.group(0))
                     else:
                         # Try to find JSON with curly braces
-                        json_match = re.search(r'\{.*\}', entity_response.choices[0].message.content, re.DOTALL)
+                        json_match = re.search(r'\{.*\}', response_content, re.DOTALL)
                         if json_match:
                             potential_json = json_match.group(0)
                             entities = json.loads(f"[{potential_json}]")
                         else:
-                            entities = []
-                            logger.warning(f"Could not extract JSON from entity response")
+                            logger.warning(f"Could not extract JSON from entity response for chunk {chunk_id}")
                 except Exception as e:
-                    logger.warning(f"Failed to parse entity JSON: {str(e)}")
-                    entities = []
-
-                # Create chunk node with its content and link to document
-                logger.debug(f"Creating chunk node {chunk_id} and linking to document {source_doc}")
-                query = """
-                MERGE (c:Chunk {id: $chunk_id})
-                SET c.content = $content,
-                    c.page_num = $page_num
-                WITH c
-                MATCH (d:Document {id: $doc_id})
-                MERGE (d)-[:CONTAINS]->(c)
-                RETURN c
-                """
-                params = {
-                    "chunk_id": chunk_id,
-                    "content": chunk.page_content,
-                    "page_num": chunk.metadata.get('page', 0),
-                    "doc_id": source_doc
-                }
-                graph.query(query, params=params)
-
-                # Create entity nodes and relationships
-                for entity in entities:
-                    if not isinstance(entity, dict) or 'name' not in entity or 'type' not in entity:
-                        logger.warning(f"Invalid entity format: {entity}")
-                        continue
-
-                    entity_name = entity.get('name')
-                    entity_type = entity.get('type')
-
-                    if not entity_name or not entity_type:
-                        continue
-
-                    # Clean entity name and create ID
-                    clean_name = re.sub(r'[^\w]', '_', entity_name).lower()
-                    entity_id = f"{clean_name}_{entity_type.lower()}"
-
-                    # Create entity node and link to chunk
-                    logger.debug(f"Creating entity node {entity_id} and linking to chunk {chunk_id}")
-                    query = """
-                    MERGE (e:Entity {id: $entity_id})
-                    SET e.name = $name,
-                        e.type = $type
-                    WITH e
-                    MATCH (c:Chunk {id: $chunk_id})
-                    MERGE (c)-[:MENTIONS {type: $type}]->(e)
-                    RETURN e
-                    """
-                    params = {
-                        "entity_id": entity_id,
-                        "name": entity_name,
-                        "type": entity_type,
-                        "chunk_id": chunk_id
-                    }
-                    graph.query(query, params=params)
-
+                    logger.warning(f"Failed to parse entity JSON for chunk {chunk_id}: {str(e)}")
+                
+                return (chunk_id, source_doc, entities, chunk.page_content, chunk.metadata.get('page', 0))
+            
             except Exception as e:
                 logger.error(f"Error processing chunk {chunk_id}: {str(e)}", exc_info=True)
-                continue
+                return (chunk_id, source_doc, [], chunk.page_content, chunk.metadata.get('page', 0))
+        
+        # Process chunk results and store in Neo4j
+        def store_chunk_data(result):
+            chunk_id, source_doc, entities, content, page_num = result
+            
+            try:
+                # Create chunk node with its content and link to document
+                with lock:  # Use lock for thread-safe database operations
+                    logger.debug(f"Creating chunk node {chunk_id} and linking to document {source_doc}")
+                    query = """
+                    MERGE (c:Chunk {id: $chunk_id})
+                    SET c.content = $content,
+                        c.page_num = $page_num
+                    WITH c
+                    MATCH (d:Document {id: $doc_id})
+                    MERGE (d)-[:CONTAINS]->(c)
+                    RETURN c
+                    """
+                    params = {
+                        "chunk_id": chunk_id,
+                        "content": content,
+                        "page_num": page_num,
+                        "doc_id": source_doc
+                    }
+                    graph.query(query, params=params)
+                
+                    # Create entity nodes and relationships
+                    for entity in entities:
+                        if not isinstance(entity, dict) or 'name' not in entity or 'type' not in entity:
+                            logger.warning(f"Invalid entity format: {entity}")
+                            continue
+
+                        entity_name = entity.get('name')
+                        entity_type = entity.get('type')
+
+                        if not entity_name or not entity_type:
+                            continue
+
+                        # Clean entity name and create ID
+                        clean_name = re.sub(r'[^\w]', '_', entity_name).lower()
+                        entity_id = f"{clean_name}_{entity_type.lower()}"
+
+                        # Create entity node and link to chunk
+                        logger.debug(f"Creating entity node {entity_id} and linking to chunk {chunk_id}")
+                        query = """
+                        MERGE (e:Entity {id: $entity_id})
+                        SET e.name = $name,
+                            e.type = $type
+                        WITH e
+                        MATCH (c:Chunk {id: $chunk_id})
+                        MERGE (c)-[:MENTIONS {type: $type}]->(e)
+                        RETURN e
+                        """
+                        params = {
+                            "entity_id": entity_id,
+                            "name": entity_name,
+                            "type": entity_type,
+                            "chunk_id": chunk_id
+                        }
+                        graph.query(query, params=params)
+            except Exception as e:
+                logger.error(f"Error storing chunk {chunk_id} data: {str(e)}", exc_info=True)
+        
+        # Use ThreadPoolExecutor to process chunks in parallel
+        progress_interval = max(1, len(chunks) // 10)  # Log progress at 10% intervals
+        completed = 0
+        
+        with concurrent.futures.ThreadPoolExecutor(max_workers=max_concurrent_requests) as executor:
+            # Submit all chunks for processing
+            future_to_chunk = {executor.submit(process_chunk, chunk): i for i, chunk in enumerate(chunks)}
+            
+            # Process results as they complete
+            for future in concurrent.futures.as_completed(future_to_chunk):
+                chunk_index = future_to_chunk[future]
+                try:
+                    result = future.result()
+                    store_chunk_data(result)
+                    
+                    # Update progress counter
+                    completed += 1
+                    if completed % progress_interval == 0:
+                        logger.info(f"Processed {completed}/{len(chunks)} chunks ({completed/len(chunks)*100:.1f}%)")
+                        
+                except Exception as e:
+                    logger.error(f"Error processing chunk {chunk_index}: {str(e)}", exc_info=True)
+        
+        logger.info(f"Completed processing all {len(chunks)} chunks")
 
         # Create connections between related entities
         logger.info("Creating connections between related entities")

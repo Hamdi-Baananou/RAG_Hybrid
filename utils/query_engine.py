@@ -4,7 +4,7 @@ import json
 from typing import List, Dict, Any
 from langchain_community.graphs import Neo4jGraph
 from langchain.vectorstores.neo4j_vector import Neo4jVector
-from mistralai import Mistral
+import fireworks.client as fw
 from utils.logging_config import logger
 
 def extract_entities_from_question(question: str) -> List[str]:
@@ -115,11 +115,11 @@ def answer_question(
     neo4j_username: str, 
     neo4j_password: str
 ) -> Dict[str, Any]:
-    """Generate answer based on retrieved contexts using Mistral API
+    """Generate answer based on retrieved contexts using Fireworks API
     
     Args:
         question: User question text
-        api_key: Mistral API key
+        api_key: Fireworks API key
         contexts: List of context dictionaries
         neo4j_uri: Neo4j connection URI
         neo4j_username: Neo4j username
@@ -157,22 +157,22 @@ def answer_question(
 
         Include references to document sources when possible. Be precise and concise."""
 
-        # Initialize Mistral client - UPDATED FOR v1.0.0
-        mistral_client = Mistral(api_key=api_key)
+        # Initialize Fireworks client
+        fw.client.api_key = api_key
 
-        # Send request to Mistral API - UPDATED FOR v1.0.0
-        response = mistral_client.chat.complete(
-            model="mistral-small-latest",
+        # Send request to Fireworks API
+        response = fw.ChatCompletion.create(
+            model="accounts/fireworks/models/llama-v3-70b-instruct",  # Update with appropriate model
             messages=[{"role": "user", "content": prompt}],
             max_tokens=1024,
             temperature=0.3
         )
 
-        # Handle Mistral's response format
+        # Handle Fireworks response format
         if response.choices and len(response.choices) > 0:
             message_content = response.choices[0].message.content
         else:
-            raise ValueError("No response content found in Mistral API response.")
+            raise ValueError("No response content found in Fireworks API response.")
 
         # Clean up the response
         cleaned_answer = re.sub(r'\\boxed{', '', message_content)  # Remove LaTeX box start
