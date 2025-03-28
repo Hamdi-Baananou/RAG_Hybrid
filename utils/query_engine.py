@@ -38,13 +38,16 @@ def extract_entities_with_llm(
     question: str,
     api_key: str,
     model: str = "accounts/fireworks/models/llama-v3p1-8b-instruct",
-    max_retries: int = 2,
-    initial_backoff: float = 1.0
+    max_retries: int = 3,
+    initial_backoff: float = 2.0
     ) -> List[str]:
     """Extracts named entities and key concepts from the question using an LLM."""
     logger.debug(f"Extracting entities via LLM from: {question}")
     fw.api_key = api_key # Ensure API key is set
 
+    # Small proactive delay before making API call to avoid burst limits
+    time.sleep(random.uniform(0.1, 0.3))
+    
     # Simple prompt for entity extraction
     prompt = f"""
     Extract the key named entities (like people, organizations, locations, products, technologies)
@@ -63,8 +66,8 @@ def extract_entities_with_llm(
             response = fw.ChatCompletion.create(
                 model=model,
                 messages=[{"role": "user", "content": prompt}],
-                max_tokens=100, # Usually enough for a list of terms
-                temperature=0.0, # Deterministic extraction
+                max_tokens=100,
+                temperature=0.0,
             )
 
             if response.choices and len(response.choices) > 0:
@@ -83,7 +86,8 @@ def extract_entities_with_llm(
                  logger.error(f"LLM entity extraction failed after {max_retries} retries: {e}")
                  return [] # Return empty list on final failure
             else:
-                 wait_time = backoff_time + random.uniform(0, backoff_time * 0.5)
+                 # Add more jitter to avoid synchronized retries
+                 wait_time = backoff_time + random.uniform(0, backoff_time)
                  logger.warning(f"LLM entity extraction attempt {current_retry} failed ({e}). Retrying in {wait_time:.2f}s...")
                  time.sleep(wait_time)
                  backoff_time = min(backoff_time * 2, 30.0) # Exponential backoff capped at 30s
