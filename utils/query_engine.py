@@ -197,6 +197,9 @@ def get_query_context(
             OPTIONAL MATCH (c1)<-[:CONTAINS]-(d1:Document) // Get source doc if available
             WITH c1, e1, score, type, d1
 
+            RETURN c1.id AS chunk_id, c1.content AS content, c1.page_num AS page_num,
+                   d1.id AS source_document, type, score, collect(DISTINCT e1.name) AS matched_entities
+
             UNION
 
             // Related mentions (one hop)
@@ -206,13 +209,14 @@ def get_query_context(
             OPTIONAL MATCH (c2)<-[:CONTAINS]-(d2:Document)
             WITH c2 AS c1, e3 AS e1, score, type, d2 AS d1 // Align variable names for aggregation
 
-            // Aggregate results per chunk, prioritizing direct matches
-            WITH c1, type, max(score) AS max_score, collect(DISTINCT e1.name) AS matched_entities, d1
-            ORDER BY max_score DESC, size(matched_entities) DESC // Prioritize higher score, more matches
-            LIMIT $graph_limit // Apply overall limit
-
+            // Return from this branch too
             RETURN c1.id AS chunk_id, c1.content AS content, c1.page_num AS page_num,
-                   d1.id AS source_document, type, max_score, matched_entities
+                   d1.id AS source_document, type, score, collect(DISTINCT e1.name) AS matched_entities
+
+            // Final aggregation if needed
+            // WITH * 
+            // ORDER BY score DESC, size(matched_entities) DESC // Prioritize higher score, more matches
+            // LIMIT $graph_limit // Apply overall limit
             """
 
             try:

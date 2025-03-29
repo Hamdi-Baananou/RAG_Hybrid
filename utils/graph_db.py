@@ -651,7 +651,7 @@ def setup_vector_index(
                       '{index_name}',
                       '{node_label}',
                       '{embedding_property}',
-                      1536,
+                      384,  # Change from 1536 to 384 to match your embeddings
                       'cosine'
                     )
                     """

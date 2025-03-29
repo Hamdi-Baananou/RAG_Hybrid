@@ -302,14 +302,14 @@ def main():
     neo4j_uri = os.environ.get("NEO4J_URI", "neo4j://localhost:7687")
     neo4j_username = os.environ.get("NEO4J_USERNAME", "neo4j")
     neo4j_password = os.environ.get("NEO4J_PASSWORD", "")
-    fireworks_api_key = os.environ.get("FIREWORKS_API_KEY", "")
+    deepseek_api_key = os.environ.get("DEEPSEEK_API_KEY", "")
     
     # Use Streamlit secrets for sensitive info if available
     if hasattr(st, "secrets"):
         if "neo4j_password" in st.secrets:
             neo4j_password = st.secrets["neo4j_password"]
-        if "fireworks_api_key" in st.secrets:
-            fireworks_api_key = st.secrets["fireworks_api_key"]
+        if "deepseek_api_key" in st.secrets:
+            deepseek_api_key = st.secrets["deepseek_api_key"]
     
     # Always reset the database
     reset_db = True
@@ -364,7 +364,7 @@ def main():
                     neo4j_uri,
                     neo4j_username,
                     neo4j_password,
-                    fireworks_api_key,
+                    deepseek_api_key,
                     reset_db
                 )
                 
@@ -372,7 +372,7 @@ def main():
                     # Run all extractions automatically
                     st.subheader("🔍 Running Information Extraction")
                     st.session_state.extraction_results = run_all_extractions(
-                        fireworks_api_key,
+                        deepseek_api_key,
                         st.session_state.graph_data
                     )
                     st.session_state.processing_complete = True
