@@ -153,7 +153,11 @@ def ask_graph_rag(
             contexts = get_query_context(
                 question,
                 graph_data["vector_store"],
-                graph_data["graph"]
+                graph_data["graph"],
+                api_key,
+                k_vector=3,
+                k_graph=5,
+                use_llm_extraction=True
             )
 
             # Get answer using context
