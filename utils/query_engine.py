@@ -282,6 +282,7 @@ def answer_question(
         compiled_context = ""
         current_token_count = 0 # Rough estimate
         contexts_included = 0
+        contexts_details = []  # Store details about included contexts
 
         for ctx in contexts:
             # Format context entry - include key details like source, doc, page
@@ -290,6 +291,15 @@ def answer_question(
             if ctx.get('page_num') is not None: ctx_entry += f"Page: {ctx['page_num']}\n"
             if ctx.get('matched_entities'): ctx_entry += f"Matched Entities: {', '.join(ctx['matched_entities'])}\n"
             ctx_entry += f"Content: {ctx.get('content', '')}\n\n"
+
+            # Store details for response
+            context_detail = {
+                "source_type": ctx['source'],
+                "document": ctx.get('source_document', 'Unknown'),
+                "page": ctx.get('page_num'),
+                "matched_entities": ctx.get('matched_entities', [])
+            }
+            contexts_details.append(context_detail)
 
             # Estimate token count (simple space split, adjust if using a proper tokenizer)
             entry_token_estimate = len(ctx_entry.split())
@@ -358,14 +368,37 @@ If the information is not available in the provided context, state that clearly.
         # Basic cleaning (less aggressive than before)
         cleaned_answer = answer # Keep most LLM formatting unless problematic
 
+        # Count the number of contexts from each source type
+        source_type_counts = {}
+        for i in range(contexts_included):
+            source_type = contexts_details[i]["source_type"]
+            source_type_counts[source_type] = source_type_counts.get(source_type, 0) + 1
+        
+        # Format the context source information for display
+        context_source_details = []
+        for source_type, count in source_type_counts.items():
+            context_source_details.append(f"{source_type} ({count})")
+        
+        # Extract all unique entity matches for display
+        all_entities = []
+        for i in range(contexts_included):
+            all_entities.extend(contexts_details[i].get("matched_entities", []))
+        unique_entities = list(set(all_entities))
+
         result = {
             "answer": cleaned_answer,
             "processing_time": time.time() - start_time,
             "contexts_used": contexts_included,
-            "context_sources": list(set([c['source'] for c in contexts[:contexts_included]])) # Sources actually used
+            "context_sources": list(set([c['source'] for c in contexts[:contexts_included]])),  # Sources actually used
+            "context_source_counts": source_type_counts,  # Count of each source type
+            "context_details": contexts_details[:contexts_included],  # Detailed info about each context
+            "matched_entities": unique_entities  # All entities matched in used contexts
         }
 
         logger.info(f"Answer generated in {time.time() - start_time:.2f} seconds")
+        logger.info(f"Context sources used: {', '.join(context_source_details)}")
+        if unique_entities:
+            logger.info(f"Entities matched: {', '.join(unique_entities)}")
         return result
 
     except Exception as e:
