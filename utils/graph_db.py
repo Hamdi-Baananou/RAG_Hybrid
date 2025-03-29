@@ -628,7 +628,11 @@ def setup_vector_index(
 
         # Initialize Neo4j connection directly to set up vector index
         logger.info("Creating vector index directly via Neo4j query if it doesn't exist...")
-        with Neo4jGraph(url=neo4j_uri, username=neo4j_username, password=neo4j_password) as direct_graph:
+        
+        # FIX: Don't use with statement since Neo4jGraph doesn't support context manager
+        direct_graph = Neo4jGraph(url=neo4j_uri, username=neo4j_username, password=neo4j_password)
+        
+        try:
             # Check if the index exists
             index_check_query = """
             SHOW INDEXES YIELD name, type
@@ -659,6 +663,9 @@ def setup_vector_index(
                     logger.info("Continuing with the expectation that Neo4jVector will handle index creation")
             else:
                 logger.info(f"Vector index '{index_name}' already exists")
+        finally:
+            # No need to explicitly close since we're not using context manager
+            pass
 
         logger.info("Initializing Neo4jVector store...")
         # Try initializing the store object first
