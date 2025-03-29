@@ -8,21 +8,13 @@ from langchain.docstore.document import Document
 import json
 import re
 from typing import List, Dict, Any, Tuple
-import fireworks.client as fw
+# import fireworks.client as fw
 import concurrent.futures
 from threading import Lock
 import random # For jitter in backoff
 from datetime import datetime # For consistent datetime handling
-
-# Import the specific error type from fireworks client if available, otherwise use a general exception catch
-try:
-    from fireworks.client.error import RateLimitError
-except ImportError:
-    # Define a placeholder if the specific error class isn't available
-    # Or rely on catching broader API errors if RateLimitError structure unknown
-    class RateLimitError(Exception): pass
-    logger.warning("fireworks.client.error.RateLimitError not found. Using generic Exception for rate limit handling.")
-
+# Import OpenAI client for DeepSeek API
+from openai import OpenAI
 
 # Assume logger is configured elsewhere, e.g., from logging_config
 import logging
@@ -248,7 +240,7 @@ def _create_chunk_and_entities_tx(tx, chunk_id, source_doc_id, content, page_num
         # logger.debug(f"Chunk {chunk_id}: No entities to process.") # Optional: Log if no entities
 
 
-# --- create_knowledge_graph (Integrated Retry Logic and Calls Transaction Func) ---
+# --- create_knowledge_graph (Updated for DeepSeek API) ---
 def create_knowledge_graph(
     graph: Neo4jGraph,
     chunks: List[Document],
@@ -257,10 +249,10 @@ def create_knowledge_graph(
     max_retries: int = 5, # Max retries for API calls
     initial_backoff: float = 1.5, # Slightly increased initial wait
     max_backoff: float = 60.0, # Maximum wait time
-    llm_model_name: str = "accounts/fireworks/models/llama-v3p1-8b-instruct", # Make model configurable
+    llm_model_name: str = "deepseek-chat", # Default DeepSeek model
     max_concurrent_requests: int = 5 # Keep concurrency moderate
 ) -> None:
-    """Create a knowledge graph from the document chunks with rate limit handling."""
+    """Create a knowledge graph from the document chunks with DeepSeek API."""
     logger.info("Starting knowledge graph creation")
     start_time = time.time()
     try:
@@ -298,11 +290,13 @@ def create_knowledge_graph(
                 logger.error(f"Failed to create/update document node for {doc_id}: {e}", exc_info=True)
                 # Decide whether to continue or raise
 
-        # --- Setup Fireworks API ---
+        # --- Setup DeepSeek API ---
         if not api_key:
-            logger.error("Fireworks API key not provided. Cannot extract entities.")
-            raise ValueError("Missing Fireworks API key")
-        fw.api_key = api_key
+            logger.error("DeepSeek API key not provided. Cannot extract entities.")
+            raise ValueError("Missing DeepSeek API key")
+        
+        # Initialize OpenAI client with DeepSeek base URL
+        openai_client = OpenAI(api_key=api_key, base_url="https://api.deepseek.com")
         logger.info(f"Using LLM model: {llm_model_name}")
         logger.info(f"Using max_concurrent_requests: {max_concurrent_requests}")
 
@@ -336,7 +330,6 @@ def create_knowledge_graph(
                      logger.warning(f"Chunk {chunk_id} has empty content. Skipping entity extraction.")
                      return (chunk_id, source_doc_id, [], chunk.page_content, page_num)
 
-
                 # Improved prompt clarity and constraint
                 entity_prompt = f"""
                 Extract significant named entities (Person, Organization, Location, Product, Technology, etc.)
@@ -348,7 +341,7 @@ def create_knowledge_graph(
                 {chunk.page_content[:2000]}
 
                 JSON LIST:
-                """ # Increased context slightly
+                """
 
                 current_retry = 0
                 backoff_time = initial_backoff
@@ -356,12 +349,15 @@ def create_knowledge_graph(
 
                 while current_retry < max_retries:
                     try:
-                        completion = fw.ChatCompletion.create(
+                        # Use DeepSeek API via OpenAI client
+                        completion = openai_client.chat.completions.create(
                             model=llm_model_name,
-                            messages=[{"role": "user", "content": entity_prompt}],
-                            max_tokens=1024, # Adjust based on expected output size
+                            messages=[
+                                {"role": "system", "content": "You are a helpful assistant that extracts named entities and concepts from text into JSON format."},
+                                {"role": "user", "content": entity_prompt}
+                            ],
+                            max_tokens=1024,
                             temperature=0.0, # Lower temperature for more deterministic extraction
-                            # response_format={"type": "json_object"}, # Uncomment if supported AND your prompt guarantees a dict containing the list
                         )
 
                         response_content = completion.choices[0].message.content
@@ -374,27 +370,19 @@ def create_knowledge_graph(
 
                         break # Success, exit retry loop
 
-                    except RateLimitError as rle:
+                    except Exception as api_err:
                         current_retry += 1
                         if current_retry >= max_retries:
-                            logger.error(f"Rate limit final failure after {max_retries} retries for chunk {chunk_id}. Skipping entity extraction for this chunk. Error: {rle}")
+                            logger.error(f"API call final failure after {max_retries} retries for chunk {chunk_id}. Skipping entity extraction for this chunk. Error: {api_err}")
                             # Return successfully processed chunk info but with empty entities
                             return (chunk_id, source_doc_id, [], chunk.page_content, page_num)
                         else:
                             # Exponential backoff with jitter
                             wait_time = backoff_time + random.uniform(0, backoff_time * 0.5)
                             wait_time = min(wait_time, max_backoff) # Ensure wait time doesn't exceed max
-                            logger.warning(f"Rate limit hit for chunk {chunk_id}. Retrying in {wait_time:.2f} seconds... (Attempt {current_retry}/{max_retries})")
+                            logger.warning(f"API call failed for chunk {chunk_id}. Retrying in {wait_time:.2f} seconds... (Attempt {current_retry}/{max_retries})")
                             time.sleep(wait_time)
                             backoff_time = min(backoff_time * 2, max_backoff) # Double backoff time, capped
-
-                    except Exception as api_err:
-                        # Handle other potential API errors (network, invalid request, etc.)
-                        logger.error(f"API call failed unexpectedly for chunk {chunk_id}: {api_err}", exc_info=True)
-                        # Decide if retrying makes sense or just fail this chunk's entity extraction
-                        # For now, we stop retrying on non-rate-limit errors
-                        return (chunk_id, source_doc_id, [], chunk.page_content, page_num)
-
 
                 # Log if entities were successfully extracted or if none were found after successful API call
                 if entities:

@@ -10,3 +10,4 @@ plotly>=5.18.0
 python-dotenv>=1.0.0
 huggingface-hub>=0.16.4
 sentence-transformers>=2.2.2 
+openai
