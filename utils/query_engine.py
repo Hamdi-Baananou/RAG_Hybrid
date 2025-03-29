@@ -8,7 +8,7 @@ from typing import List, Dict, Any, Optional, Tuple
 from langchain_community.graphs import Neo4jGraph
 # from langchain.vectorstores.neo4j_vector import Neo4jVector # Original outdated import
 from langchain_community.vectorstores import Neo4jVector # Corrected import
-import fireworks.client as fw
+from openai import OpenAI  # Add this import
 from utils.logging_config import logger # Assuming logger is configured correctly
 
 # --- Option 1: Keep Simple Entity Extractor (with improvements) ---
@@ -37,14 +37,16 @@ from utils.logging_config import logger # Assuming logger is configured correctl
 def extract_entities_with_llm(
     question: str,
     api_key: str,
-    model: str = "accounts/fireworks/models/llama-v3p1-8b-instruct",
+    model: str = "deepseek-chat",  # Changed from Fireworks model
     max_retries: int = 3,
     initial_backoff: float = 2.0
     ) -> List[str]:
-    """Extracts named entities and key concepts from the question using an LLM."""
-    logger.debug(f"Extracting entities via LLM from: {question}")
-    fw.api_key = api_key # Ensure API key is set
-
+    """Extracts named entities and key concepts from the question using DeepSeek LLM."""
+    logger.debug(f"Extracting entities via DeepSeek LLM from: {question}")
+    
+    # Initialize OpenAI client with DeepSeek base URL
+    client = OpenAI(api_key=api_key, base_url="https://api.deepseek.com", timeout=30.0)
+    
     # Small proactive delay before making API call to avoid burst limits
     time.sleep(random.uniform(0.1, 0.3))
     
@@ -63,9 +65,12 @@ def extract_entities_with_llm(
     backoff_time = initial_backoff
     while current_retry < max_retries:
         try:
-            response = fw.ChatCompletion.create(
+            response = client.chat.completions.create(
                 model=model,
-                messages=[{"role": "user", "content": prompt}],
+                messages=[
+                    {"role": "system", "content": "You are a helpful assistant that extracts entities from text."},
+                    {"role": "user", "content": prompt}
+                ],
                 max_tokens=100,
                 temperature=0.0,
             )
@@ -80,7 +85,7 @@ def extract_entities_with_llm(
                 logger.warning("LLM entity extraction returned no choices.")
                 return [] # Return empty list on failure
 
-        except Exception as e: # Catching broader errors including potential RateLimitError
+        except Exception as e:
             current_retry += 1
             if current_retry >= max_retries:
                  logger.error(f"LLM entity extraction failed after {max_retries} retries: {e}")
@@ -264,10 +269,10 @@ def answer_question(
     neo4j_uri: str,
     neo4j_username: str,
     neo4j_password: str,
-    model_name: str = "accounts/fireworks/models/llama-v3p1-8b-instruct",
+    model_name: str = "deepseek-chat",  # Changed from Fireworks model
     max_context_tokens: int = 3000 # Estimate max tokens for context to avoid exceeding limit
 ) -> Dict[str, Any]:
-    """Generate answer based on retrieved contexts using Fireworks API."""
+    """Generate answer based on retrieved contexts using DeepSeek API."""
     logger.info(f"Generating answer for question: {question}")
     start_time = time.time()
 
@@ -333,33 +338,33 @@ If the information is not available in the provided context, state that clearly.
 **Retrieved Context:**
 {compiled_context}
 
-
-
 **Question:**
 {question}
 
 **Answer:**
 """
 
-        # --- Call LLM ---
-        fw.api_key = api_key # Ensure API key is set
+        # --- Call DeepSeek LLM ---
+        # Initialize OpenAI client with DeepSeek base URL
+        client = OpenAI(api_key=api_key, base_url="https://api.deepseek.com", timeout=60.0)
         
-        response = fw.ChatCompletion.create(
+        response = client.chat.completions.create(
             model=model_name,
-            messages=[{"role": "user", "content": prompt}],
+            messages=[
+                {"role": "system", "content": "You are a helpful assistant answering questions based on provided context."},
+                {"role": "user", "content": prompt}
+            ],
             max_tokens=1024, # Max tokens for the *answer*
-            temperature=0.1, # Low temperature for factual answers
-            # stop=["\n\n"] # Optional: Stop generation early if needed
+            temperature=0.1 # Low temperature for factual answers
         )
 
         # --- Process Response ---
         if response.choices and len(response.choices) > 0:
             answer = response.choices[0].message.content.strip()
         else:
-            raise ValueError("No response content found in Fireworks API response.")
+            raise ValueError("No response content found in DeepSeek API response.")
 
         # Basic cleaning (less aggressive than before)
-        # cleaned_answer = re.sub(r'\\boxed{.*?}', '', answer) # Remove specific LaTeX if needed
         cleaned_answer = answer # Keep most LLM formatting unless problematic
 
         result = {

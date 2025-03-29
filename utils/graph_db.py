@@ -278,45 +278,47 @@ def create_knowledge_graph(
     initial_backoff: float = 1.5,
     max_backoff: float = 60.0,
     llm_model_name: str = "deepseek-chat",
-    max_concurrent_requests: int = 3  # Reduced to be more conservative
+    max_concurrent_requests: int = 20,  # Increased from 3 to 20
+    tcp_connections_limit: int = 100,   # New parameter to control connection pool
 ) -> None:
     """Create a knowledge graph from the document chunks with DeepSeek API."""
     logger.info("Starting knowledge graph creation")
     start_time = time.time()
     
-    # Validate API key before making any calls
-    if not api_key or len(api_key) < 20:  # Basic validation
-        error_msg = "Invalid or missing DeepSeek API key. Check your environment variables or Streamlit secrets."
-        logger.critical(error_msg)
-        raise ValueError(error_msg)
+    # Configure connection pooling for OpenAI client
+    import httpx
+    
+    # Initialize OpenAI client with connection pooling
+    openai_client = OpenAI(
+        api_key=api_key, 
+        base_url="https://api.deepseek.com",
+        timeout=30.0,  # Set a default timeout for all requests
+        http_client=httpx.Client(
+            limits=httpx.Limits(
+                max_connections=tcp_connections_limit,
+                max_keepalive_connections=tcp_connections_limit
+            )
+        )
+    )
+    
+    # Verify connection with a simple API call
+    try:
+        logger.info("Testing DeepSeek API connection...")
+        test_response = openai_client.chat.completions.create(
+            model=llm_model_name,
+            messages=[
+                {"role": "system", "content": "You are a helpful assistant."},
+                {"role": "user", "content": "Hello"}
+            ],
+            max_tokens=10,
+            temperature=0.0
+        )
+        logger.info("DeepSeek API connection successful")
+    except Exception as conn_err:
+        logger.critical(f"Failed to establish connection to DeepSeek API: {str(conn_err)}")
+        raise ValueError(f"DeepSeek API connection test failed: {str(conn_err)}")
     
     try:
-        # Initialize OpenAI client with DeepSeek base URL
-        openai_client = OpenAI(
-            api_key=api_key, 
-            base_url="https://api.deepseek.com",
-            timeout=30.0  # Set a default timeout for all requests
-        )
-        
-        # Verify connection with a simple API call
-        try:
-            logger.info("Testing DeepSeek API connection...")
-            test_response = openai_client.chat.completions.create(
-                model=llm_model_name,
-                messages=[
-                    {"role": "system", "content": "You are a helpful assistant."},
-                    {"role": "user", "content": "Hello"}
-                ],
-                max_tokens=10,
-                temperature=0.0
-            )
-            logger.info("DeepSeek API connection successful")
-        except Exception as conn_err:
-            logger.critical(f"Failed to establish connection to DeepSeek API: {str(conn_err)}")
-            raise ValueError(f"DeepSeek API connection test failed: {str(conn_err)}")
-        
-        # Continue with the rest of your function...
-
         # --- Create Source Document Nodes ---
         logger.info("Creating/updating source document nodes...")
         for source, metadata in source_metadata.items():
@@ -500,42 +502,54 @@ def create_knowledge_graph(
 
 
         # --- Execute Processing and Storing using ThreadPoolExecutor ---
-        with concurrent.futures.ThreadPoolExecutor(max_workers=max_concurrent_requests, thread_name_prefix='GraphWorker') as executor:
-            # Submit API call tasks
-            future_to_chunk = {
-                executor.submit(process_chunk_api_call, chunk): chunk
-                for chunk in chunks if chunk.metadata.get('chunk_id') # Ensure chunk has an ID
-            }
+        with concurrent.futures.ThreadPoolExecutor(
+            max_workers=max_concurrent_requests, 
+            thread_name_prefix='GraphWorker'
+        ) as executor:
+            # Add a batch processing approach for very large datasets
+            chunk_batches = [chunks[i:i + 1000] for i in range(0, len(chunks), 1000)]
+            
+            for batch_idx, batch in enumerate(chunk_batches):
+                logger.info(f"Processing batch {batch_idx+1}/{len(chunk_batches)} with {len(batch)} chunks")
+                
+                # Submit API call tasks for this batch
+                future_to_chunk = {
+                    executor.submit(process_chunk_api_call, chunk): chunk
+                    for chunk in batch if chunk.metadata.get('chunk_id')
+                }
+                
+                # Process results as they complete
+                for future in concurrent.futures.as_completed(future_to_chunk):
+                    original_chunk = future_to_chunk[future]
+                    chunk_id_for_log = original_chunk.metadata.get('chunk_id', 'UNKNOWN')
+                    try:
+                        # Get the result from the API call worker (contains chunk info + entities)
+                        api_result = future.result()
+                        if api_result and api_result[0]: # Check if result is valid and has chunk_id
+                            # Submit the database storage task (could use another executor or run sequentially here)
+                            # Running sequentially here simplifies progress tracking and avoids overwhelming DB connection pool
+                            store_chunk_data_in_db(api_result)
+                        else:
+                             logger.warning(f"API processing failed to return valid data for chunk {chunk_id_for_log}. Skipping DB storage.")
+                             # Still increment count as we attempted to process it
+                             processed_count += 1
+                             if processed_count % progress_interval == 0 or processed_count == total_chunks:
+                                 elapsed_time = time.time() - start_time
+                                 logger.info(f"Processed {processed_count}/{total_chunks} chunks ({processed_count/total_chunks*100:.1f}%) in {elapsed_time:.2f} seconds")
 
-            # Process results as they complete
-            for future in concurrent.futures.as_completed(future_to_chunk):
-                original_chunk = future_to_chunk[future]
-                chunk_id_for_log = original_chunk.metadata.get('chunk_id', 'UNKNOWN')
-                try:
-                    # Get the result from the API call worker (contains chunk info + entities)
-                    api_result = future.result()
-                    if api_result and api_result[0]: # Check if result is valid and has chunk_id
-                        # Submit the database storage task (could use another executor or run sequentially here)
-                        # Running sequentially here simplifies progress tracking and avoids overwhelming DB connection pool
-                        store_chunk_data_in_db(api_result)
-                    else:
-                         logger.warning(f"API processing failed to return valid data for chunk {chunk_id_for_log}. Skipping DB storage.")
-                         # Still increment count as we attempted to process it
-                         processed_count += 1
-                         if processed_count % progress_interval == 0 or processed_count == total_chunks:
-                             elapsed_time = time.time() - start_time
-                             logger.info(f"Processed {processed_count}/{total_chunks} chunks ({processed_count/total_chunks*100:.1f}%) in {elapsed_time:.2f} seconds")
 
+                    except Exception as exc:
+                        # Catch exceptions raised from process_chunk_api_call itself if future.result() fails unexpectedly
+                        logger.error(f"Error retrieving result for chunk {chunk_id_for_log}: {exc}", exc_info=True)
+                        # Increment count even on failure to retrieve result
+                        processed_count += 1
+                        if processed_count % progress_interval == 0 or processed_count == total_chunks:
+                            elapsed_time = time.time() - start_time
+                            logger.info(f"Processed {processed_count}/{total_chunks} chunks ({processed_count/total_chunks*100:.1f}%) in {elapsed_time:.2f} seconds")
 
-                except Exception as exc:
-                    # Catch exceptions raised from process_chunk_api_call itself if future.result() fails unexpectedly
-                    logger.error(f"Error retrieving result for chunk {chunk_id_for_log}: {exc}", exc_info=True)
-                    # Increment count even on failure to retrieve result
-                    processed_count += 1
-                    if processed_count % progress_interval == 0 or processed_count == total_chunks:
-                        elapsed_time = time.time() - start_time
-                        logger.info(f"Processed {processed_count}/{total_chunks} chunks ({processed_count/total_chunks*100:.1f}%) in {elapsed_time:.2f} seconds")
-
+                # Optional: Add a small delay between batches to let the system breathe
+                if batch_idx < len(chunk_batches) - 1:
+                    time.sleep(5)  # 5 second pause between batches
 
         logger.info(f"Completed processing all {total_chunks} chunks. Total time: {time.time() - start_time:.2f} seconds")
 
