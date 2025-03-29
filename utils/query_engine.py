@@ -155,88 +155,36 @@ def get_query_context(
 
         # Step 3: Batched Graph Relationship Search (if entities were found)
         if entities_in_question:
-            logger.debug(f"Performing batched graph traversal for {len(entities_in_question)} entities (k_graph={k_graph})...")
-            # Prepare list of lowercased entities for the query parameter
+            logger.debug(f"Performing graph traversal for {len(entities_in_question)} entities")
             lower_entities = [entity.lower() for entity in entities_in_question]
-
-            # Construct a single, more efficient Cypher query
-            # Uses list parameter $entity_names_lower
-            # Uses optional match for related entities
-            # Prioritizes direct mentions slightly? (Could add scoring later)
-            graph_query = """
-            // Match chunks directly mentioning any of the entities
+            
+            # Direct mentions query
+            direct_query = """
             MATCH (c:Chunk)-[:MENTIONS]->(e:Entity)
-            WHERE toLower(e.name) IN $entity_names_lower
-            WITH c, e, 1 as relevance // Assign relevance score 1 for direct match
-            RETURN c.id AS chunk_id, c.content AS content, c.page_num as page_num,
-                   e.name AS matched_entity, 'direct_mention' as match_type, relevance
-            ORDER BY relevance DESC, chunk_id // Order potentially?
-            LIMIT $limit_per_type // Limit direct matches somewhat independently
-
-            UNION
-
-            // Match chunks mentioning entities RELATED to the queried entities
-            MATCH (e1:Entity)-[:RELATED_TO]-(e2:Entity)<-[:MENTIONS]-(c:Chunk)
-            WHERE toLower(e1.name) IN $entity_names_lower AND NOT toLower(e2.name) IN $entity_names_lower // Avoid overlap with direct if possible
-            WITH c, e1, e2, 0.5 as relevance // Assign lower relevance score for related match
-            RETURN c.id AS chunk_id, c.content AS content, c.page_num as page_num,
-                   e1.name + '->' + e2.name AS matched_entity, 'related_mention' as match_type, relevance
-            ORDER BY relevance DESC, chunk_id
-            LIMIT $limit_per_type // Limit related matches somewhat independently
+            WHERE toLower(e.name) IN $entity_names
+            OPTIONAL MATCH (c)<-[:CONTAINS]-(d:Document)
+            RETURN c.id AS chunk_id, c.content AS content, c.page_num AS page_num,
+                   d.id AS source_document, 'direct' AS type, 1.0 AS score, 
+                   collect(DISTINCT e.name) AS matched_entities
+            LIMIT $limit
             """
-            # Note: The UNION combined with LIMIT might not behave exactly as independent limits.
-            # A more complex query with subqueries might be needed for strict per-type limits,
-            # or simply apply a larger overall limit and filter/rank later. Let's use a combined limit.
-
-            combined_graph_query = """
-            WITH $entity_names_lower AS entities
-            // Direct mentions
-            MATCH (c1:Chunk)-[:MENTIONS]->(e1:Entity)
-            WHERE toLower(e1.name) IN entities
-            WITH c1, e1, 1.0 AS score, 'direct' AS type
-            OPTIONAL MATCH (c1)<-[:CONTAINS]-(d1:Document) // Get source doc if available
-            WITH c1, e1, score, type, d1
-
-            RETURN c1.id AS chunk_id, c1.content AS content, c1.page_num AS page_num,
-                   d1.id AS source_document, type, score, collect(DISTINCT e1.name) AS matched_entities
-
-            UNION
-
-            // Related mentions (one hop)
-            MATCH (e2:Entity)-[:RELATED_TO]-(e3:Entity)<-[:MENTIONS]-(c2:Chunk)
-            WHERE toLower(e2.name) IN entities AND NOT toLower(e3.name) IN entities // Avoid double counting direct
-            WITH c2, e2, e3, 0.5 AS score, 'related' AS type // Lower score for related
-            OPTIONAL MATCH (c2)<-[:CONTAINS]-(d2:Document)
-            WITH c2 AS c1, e3 AS e1, score, type, d2 AS d1 // Align variable names for aggregation
-
-            // Return from this branch too
-            RETURN c1.id AS chunk_id, c1.content AS content, c1.page_num AS page_num,
-                   d1.id AS source_document, type, score, collect(DISTINCT e1.name) AS matched_entities
-
-            // Final aggregation if needed
-            // WITH * 
-            // ORDER BY score DESC, size(matched_entities) DESC // Prioritize higher score, more matches
-            // LIMIT $graph_limit // Apply overall limit
-            """
-
+            
             try:
-                graph_results = graph.query(combined_graph_query, params={
-                    "entity_names_lower": lower_entities,
-                    "graph_limit": k_graph # Apply the overall graph limit
+                direct_results = graph.query(direct_query, params={
+                    "entity_names": lower_entities,
+                    "limit": k_graph
                 })
-                logger.debug(f"Graph search found {len(graph_results)} potential contexts.")
-
-                for idx, result in enumerate(graph_results):
+                
+                # Process direct results
+                for idx, result in enumerate(direct_results):
                     chunk_id = result.get('chunk_id')
-                    if not chunk_id: continue # Skip if no chunk ID
-
-                    # Add to dict, potentially overwriting simpler vector entry if graph provides more detail
-                    # Or, update existing entry if graph adds value (like matched entities)
+                    if not chunk_id: continue
+                    
                     if chunk_id not in contexts_dict:
                         contexts_dict[chunk_id] = {
-                            "source": "graph_" + result.get('type', 'unknown'), # e.g., graph_direct, graph_related
-                            "rank": idx, # Rank within graph results
-                            "score": result.get('max_score'), # Graph score
+                            "source": "graph_direct",
+                            "rank": idx,
+                            "score": result.get('score', 1.0),
                             "chunk_id": chunk_id,
                             "content": result.get('content', ''),
                             "page_num": result.get('page_num'),
@@ -244,11 +192,50 @@ def get_query_context(
                             "matched_entities": result.get('matched_entities', [])
                         }
                     else:
-                        # If chunk already exists (e.g., from vector search), enrich it
                         contexts_dict[chunk_id].setdefault("matched_entities", []).extend(result.get('matched_entities', []))
-                        contexts_dict[chunk_id]["matched_entities"] = list(set(contexts_dict[chunk_id]["matched_entities"])) # Keep unique
-                        # Could potentially update score or source if graph score is higher?
-
+                        contexts_dict[chunk_id]["matched_entities"] = list(set(contexts_dict[chunk_id]["matched_entities"]))
+            
+            except Exception as e:
+                logger.error(f"Graph traversal failed: {e}", exc_info=True)
+            
+            # Related mentions query
+            related_query = """
+            MATCH (e1:Entity)-[:RELATED_TO]-(e2:Entity)<-[:MENTIONS]-(c:Chunk)
+            WHERE toLower(e1.name) IN $entity_names AND NOT toLower(e2.name) IN $entity_names
+            OPTIONAL MATCH (c)<-[:CONTAINS]-(d:Document)
+            RETURN c.id AS chunk_id, c.content AS content, c.page_num AS page_num,
+                   d.id AS source_document, 'related' AS type, 0.5 AS score, 
+                   collect(DISTINCT e2.name) AS matched_entities,
+                   collect(DISTINCT e1.name) AS query_entities
+            LIMIT $limit
+            """
+            
+            try:
+                related_results = graph.query(related_query, params={
+                    "entity_names": lower_entities,
+                    "limit": k_graph
+                })
+                
+                # Process related results
+                for idx, result in enumerate(related_results):
+                    chunk_id = result.get('chunk_id')
+                    if not chunk_id: continue
+                    
+                    if chunk_id not in contexts_dict:
+                        contexts_dict[chunk_id] = {
+                            "source": "graph_related",
+                            "rank": idx,
+                            "score": result.get('score', 0.5),
+                            "chunk_id": chunk_id,
+                            "content": result.get('content', ''),
+                            "page_num": result.get('page_num'),
+                            "source_document": result.get('source_document', 'unknown'),
+                            "matched_entities": result.get('matched_entities', [])
+                        }
+                    else:
+                        contexts_dict[chunk_id].setdefault("matched_entities", []).extend(result.get('matched_entities', []))
+                        contexts_dict[chunk_id]["matched_entities"] = list(set(contexts_dict[chunk_id]["matched_entities"]))
+            
             except Exception as e:
                 logger.error(f"Graph traversal failed: {e}", exc_info=True)
 

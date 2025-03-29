@@ -642,27 +642,28 @@ def setup_vector_index(
             result = direct_graph.query(index_check_query, params={"index_name": index_name})
             index_exists = result[0]['exists'] if result else False
             
-            if not index_exists:
+            # If the index exists, drop it first to avoid dimension mismatch issues
+            if index_exists:
+                logger.info(f"Vector index '{index_name}' exists, dropping it to recreate with correct dimensions")
                 try:
-                    # Create the vector index using direct Cypher query
-                    # This is the Neo4j 5.x syntax for vector indexes
-                    vector_index_query = f"""
-                    CALL db.index.vector.createNodeIndex(
-                      '{index_name}',
-                      '{node_label}',
-                      '{embedding_property}',
-                      384,  # Change from 1536 to 384 to match your embeddings
-                      'cosine'
-                    )
-                    """
-                    direct_graph.query(vector_index_query)
-                    logger.info(f"Vector index '{index_name}' created successfully")
-                except Exception as e:
-                    # If the newer syntax fails, try alternative syntax or handle error
-                    logger.error(f"Failed to create vector index with Neo4j 5.x syntax: {e}")
-                    logger.info("Continuing with the expectation that Neo4jVector will handle index creation")
-            else:
-                logger.info(f"Vector index '{index_name}' already exists")
+                    direct_graph.query(f"DROP INDEX {index_name}")
+                    logger.info(f"Successfully dropped existing vector index '{index_name}'")
+                except Exception as drop_err:
+                    logger.error(f"Error dropping existing vector index: {drop_err}")
+            
+            # Create the vector index using direct Cypher query
+            # This is the Neo4j 5.x syntax for vector indexes
+            vector_index_query = f"""
+            CALL db.index.vector.createNodeIndex(
+              '{index_name}',
+              '{node_label}',
+              '{embedding_property}',
+              384,  # Using 384 dimensions for HuggingFace embeddings
+              'cosine'
+            )
+            """
+            direct_graph.query(vector_index_query)
+            logger.info(f"Vector index '{index_name}' created successfully")
         finally:
             # No need to explicitly close since we're not using context manager
             pass
