@@ -658,7 +658,7 @@ def setup_vector_index(
               '{index_name}',
               '{node_label}',
               '{embedding_property}',
-              384,  # Using 384 dimensions for HuggingFace embeddings
+              384,  // Using 384 dimensions for HuggingFace embeddings
               'cosine'
             )
             """
