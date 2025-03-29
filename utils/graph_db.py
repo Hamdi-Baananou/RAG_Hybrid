@@ -15,6 +15,9 @@ import random # For jitter in backoff
 from datetime import datetime # For consistent datetime handling
 # Import OpenAI client for DeepSeek API
 from openai import OpenAI
+import os
+import streamlit as st
+from dotenv import load_dotenv
 
 # Assume logger is configured elsewhere, e.g., from logging_config
 import logging
@@ -22,6 +25,31 @@ logger = logging.getLogger("graph_rag") # Use the same logger name as in logs
 # Basic configuration if logger is not set up externally for testing
 # logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 
+def get_api_credentials():
+    """Get API credentials from either .env file (local) or Streamlit secrets (cloud)"""
+    # Try to load from streamlit secrets first (cloud deployment)
+    try:
+        config = {
+            "neo4j_uri": st.secrets["NEO4J_URI"],
+            "neo4j_username": st.secrets["NEO4J_USERNAME"],
+            "neo4j_password": st.secrets["NEO4J_PASSWORD"],
+            "deepseek_api_key": st.secrets["DEEPSEEK_API_KEY"],
+            # Add other keys as needed
+        }
+        print("Loaded credentials from Streamlit secrets")
+        return config
+    except (KeyError, AttributeError):
+        # Fall back to .env file (local development)
+        load_dotenv()
+        config = {
+            "neo4j_uri": os.getenv("NEO4J_URI"),
+            "neo4j_username": os.getenv("NEO4J_USERNAME"),
+            "neo4j_password": os.getenv("NEO4J_PASSWORD"),
+            "deepseek_api_key": os.getenv("DEEPSEEK_API_KEY"),
+            # Add other keys as needed
+        }
+        print("Loaded credentials from .env file")
+        return config
 
 # --- connect_to_neo4j (Seems OK) ---
 def connect_to_neo4j(uri: str, username: str, password: str) -> Neo4jGraph:
@@ -245,17 +273,50 @@ def create_knowledge_graph(
     graph: Neo4jGraph,
     chunks: List[Document],
     source_metadata: Dict[str, Any],
-    api_key: str,
-    max_retries: int = 5, # Max retries for API calls
-    initial_backoff: float = 1.5, # Slightly increased initial wait
-    max_backoff: float = 60.0, # Maximum wait time
-    llm_model_name: str = "deepseek-chat", # Default DeepSeek model
-    max_concurrent_requests: int = 5 # Keep concurrency moderate
+    api_key: str,  # This should come from your config, not directly from os.getenv
+    max_retries: int = 5,
+    initial_backoff: float = 1.5,
+    max_backoff: float = 60.0,
+    llm_model_name: str = "deepseek-chat",
+    max_concurrent_requests: int = 3  # Reduced to be more conservative
 ) -> None:
     """Create a knowledge graph from the document chunks with DeepSeek API."""
     logger.info("Starting knowledge graph creation")
     start_time = time.time()
+    
+    # Validate API key before making any calls
+    if not api_key or len(api_key) < 20:  # Basic validation
+        error_msg = "Invalid or missing DeepSeek API key. Check your environment variables or Streamlit secrets."
+        logger.critical(error_msg)
+        raise ValueError(error_msg)
+    
     try:
+        # Initialize OpenAI client with DeepSeek base URL
+        openai_client = OpenAI(
+            api_key=api_key, 
+            base_url="https://api.deepseek.com",
+            timeout=30.0  # Set a default timeout for all requests
+        )
+        
+        # Verify connection with a simple API call
+        try:
+            logger.info("Testing DeepSeek API connection...")
+            test_response = openai_client.chat.completions.create(
+                model=llm_model_name,
+                messages=[
+                    {"role": "system", "content": "You are a helpful assistant."},
+                    {"role": "user", "content": "Hello"}
+                ],
+                max_tokens=10,
+                temperature=0.0
+            )
+            logger.info("DeepSeek API connection successful")
+        except Exception as conn_err:
+            logger.critical(f"Failed to establish connection to DeepSeek API: {str(conn_err)}")
+            raise ValueError(f"DeepSeek API connection test failed: {str(conn_err)}")
+        
+        # Continue with the rest of your function...
+
         # --- Create Source Document Nodes ---
         logger.info("Creating/updating source document nodes...")
         for source, metadata in source_metadata.items():
@@ -291,12 +352,7 @@ def create_knowledge_graph(
                 # Decide whether to continue or raise
 
         # --- Setup DeepSeek API ---
-        if not api_key:
-            logger.error("DeepSeek API key not provided. Cannot extract entities.")
-            raise ValueError("Missing DeepSeek API key")
-        
-        # Initialize OpenAI client with DeepSeek base URL
-        openai_client = OpenAI(api_key=api_key, base_url="https://api.deepseek.com")
+
         logger.info(f"Using LLM model: {llm_model_name}")
         logger.info(f"Using max_concurrent_requests: {max_concurrent_requests}")
 
@@ -349,26 +405,37 @@ def create_knowledge_graph(
 
                 while current_retry < max_retries:
                     try:
-                        # Use DeepSeek API via OpenAI client
-                        completion = openai_client.chat.completions.create(
-                            model=llm_model_name,
-                            messages=[
-                                {"role": "system", "content": "You are a helpful assistant that extracts named entities and concepts from text into JSON format."},
-                                {"role": "user", "content": entity_prompt}
-                            ],
-                            max_tokens=1024,
-                            temperature=0.0, # Lower temperature for more deterministic extraction
-                        )
+                        # Add detailed logging to troubleshoot API call
+                        logger.debug(f"Attempt {current_retry+1}/{max_retries} - Making API call for chunk {chunk_id}")
+                        
+                        # Use DeepSeek API via OpenAI client - Let's see the exact error
+                        try:
+                            completion = openai_client.chat.completions.create(
+                                model=llm_model_name,
+                                messages=[
+                                    {"role": "system", "content": "You are a helpful assistant that extracts named entities and concepts from text into JSON format."},
+                                    {"role": "user", "content": entity_prompt}
+                                ],
+                                max_tokens=1024,
+                                temperature=0.0, # Lower temperature for more deterministic extraction
+                                # Add timeout to avoid hanging
+                                timeout=30.0,
+                            )
+                            
+                            response_content = completion.choices[0].message.content
+                            logger.debug(f"Raw LLM response for chunk {chunk_id}: {response_content[:200]}...")
 
-                        response_content = completion.choices[0].message.content
-                        logger.debug(f"Raw LLM response for chunk {chunk_id}: {response_content[:200]}...")
+                            entities = _extract_json_from_response(response_content, chunk_id) # Pass chunk_id for logging
+                            if not entities:
+                                # Logged within _extract_json_from_response if parsing fails or empty
+                                pass # Keep processing
 
-                        entities = _extract_json_from_response(response_content, chunk_id) # Pass chunk_id for logging
-                        if not entities:
-                             # Logged within _extract_json_from_response if parsing fails or empty
-                             pass # Keep processing
-
-                        break # Success, exit retry loop
+                            break # Success, exit retry loop
+                            
+                        except Exception as detailed_error:
+                            # Log the specific error
+                            logger.error(f"Detailed API error for chunk {chunk_id}: {type(detailed_error).__name__}: {str(detailed_error)}")
+                            raise # Re-raise to be caught by the outer handler
 
                     except Exception as api_err:
                         current_retry += 1
@@ -380,7 +447,7 @@ def create_knowledge_graph(
                             # Exponential backoff with jitter
                             wait_time = backoff_time + random.uniform(0, backoff_time * 0.5)
                             wait_time = min(wait_time, max_backoff) # Ensure wait time doesn't exceed max
-                            logger.warning(f"API call failed for chunk {chunk_id}. Retrying in {wait_time:.2f} seconds... (Attempt {current_retry}/{max_retries})")
+                            logger.warning(f"API call failed for chunk {chunk_id}. Retrying in {wait_time:.2f} seconds... (Attempt {current_retry}/{max_retries}). Error: {type(api_err).__name__}: {str(api_err)}")
                             time.sleep(wait_time)
                             backoff_time = min(backoff_time * 2, max_backoff) # Double backoff time, capped
 
