@@ -10,6 +10,8 @@ from langchain_community.graphs import Neo4jGraph
 from langchain_community.vectorstores import Neo4jVector # Corrected import
 from openai import OpenAI  # Add this import
 from utils.logging_config import logger # Assuming logger is configured correctly
+import logging
+from neo4j import GraphDatabase
 
 # --- Option 1: Keep Simple Entity Extractor (with improvements) ---
 # def extract_entities_from_question_simple(question: str, min_len: int = 3) -> List[str]:
@@ -102,308 +104,383 @@ def extract_entities_with_llm(
 
 def get_query_context(
     question: str,
-    vector_store: Neo4jVector,
-    graph: Neo4jGraph,
-    api_key: str, # Needed if using LLM entity extraction
-    k_vector: int = 3,   # Number of results from vector search
-    k_graph: int = 5,    # Max results from graph search per entity type (direct/related)
-    use_llm_extraction: bool = True # Flag to choose extraction method
-) -> List[Dict[str, Any]]:
-    """Get context for query using vector similarity and batched graph relationships."""
-    logger.info(f"Getting context for question: {question}")
-    contexts_dict: Dict[str, Dict[str, Any]] = {} # Use dict for easy deduplication by chunk_id
-    start_time = time.time()
+    vector_store: Any,
+    graph: Any,
+    api_key: str,
+    k_vector: int = 3,
+    k_graph: int = 5,
+    use_llm_extraction: bool = True
+) -> Dict[str, Any]:
+    """Get enriched context by combining vector search results with graph traversal
 
+    Args:
+        question: User question or prompt
+        vector_store: Vector store for semantic search
+        graph: Neo4j graph connection
+        api_key: API key for LLM
+        k_vector: Number of vector results to retrieve
+        k_graph: Number of graph results to retrieve
+        use_llm_extraction: Whether to use LLM for extraction
+
+    Returns:
+        Combined context from vector and graph sources
+    """
+    # 1. Get vector-based context
     try:
-        # Step 1: Extract potential entities from the question
-        logger.debug("Identifying key entities in the question...")
-        if use_llm_extraction:
-            entities_in_question = extract_entities_with_llm(question, api_key)
-        else:
-            # entities_in_question = extract_entities_from_question_simple(question) # Use the simple one if preferred
-            # Fallback or default simple extraction if LLM flag is false or LLM fails
-            logger.warning("LLM extraction not used or failed, falling back to simple extraction.")
-            # A simple split might be better than the previous regex approach
-            entities_in_question = [word for word in re.findall(r'\b\w{3,}\b', question.lower()) if word not in ['the', 'a', 'an', 'is', 'of', 'for']] # Basic split
-            logger.debug(f"Simple extracted entities: {entities_in_question}")
-
-
-        if not entities_in_question:
-             logger.warning("No entities extracted from the question. Graph search will be skipped.")
-
-        # Step 2: Vector Similarity Search
-        logger.debug(f"Performing vector similarity search (k={k_vector})...")
-        try:
-            vector_results = vector_store.similarity_search_with_score(question, k=k_vector)
-            logger.debug(f"Vector search found {len(vector_results)} relevant chunks.")
-
-            for idx, (doc, score) in enumerate(vector_results):
-                chunk_id = doc.metadata.get('chunk_id', f"vector_unknown_{idx}") # Ensure some ID
-                if chunk_id not in contexts_dict: # Add if not already present
-                    contexts_dict[chunk_id] = {
-                        "source": "vector_similarity",
-                        "rank": idx,
-                        "score": score, # Include similarity score
-                        "chunk_id": chunk_id,
-                        "content": doc.page_content,
-                        "page_num": doc.metadata.get('page_num'), # Get page number if available
-                        "source_document": doc.metadata.get('source_document', 'unknown')
-                    }
-        except Exception as e:
-            logger.error(f"Vector similarity search failed: {e}", exc_info=True)
-
-
-        # Step 3: Batched Graph Relationship Search (if entities were found)
-        if entities_in_question:
-            logger.debug(f"Performing graph traversal for {len(entities_in_question)} entities")
-            lower_entities = [entity.lower() for entity in entities_in_question]
-            
-            # Direct mentions query
-            direct_query = """
-            MATCH (c:Chunk)-[:MENTIONS]->(e:Entity)
-            WHERE toLower(e.name) IN $entity_names
-            OPTIONAL MATCH (c)<-[:CONTAINS]-(d:Document)
-            RETURN c.id AS chunk_id, c.content AS content, c.page_num AS page_num,
-                   d.id AS source_document, 'direct' AS type, 1.0 AS score, 
-                   collect(DISTINCT e.name) AS matched_entities
-            LIMIT $limit
-            """
-            
-            try:
-                direct_results = graph.query(direct_query, params={
-                    "entity_names": lower_entities,
-                    "limit": k_graph
-                })
-                
-                # Process direct results
-                for idx, result in enumerate(direct_results):
-                    chunk_id = result.get('chunk_id')
-                    if not chunk_id: continue
-                    
-                    if chunk_id not in contexts_dict:
-                        contexts_dict[chunk_id] = {
-                            "source": "graph_direct",
-                            "rank": idx,
-                            "score": result.get('score', 1.0),
-                            "chunk_id": chunk_id,
-                            "content": result.get('content', ''),
-                            "page_num": result.get('page_num'),
-                            "source_document": result.get('source_document', 'unknown'),
-                            "matched_entities": result.get('matched_entities', [])
-                        }
-                    else:
-                        contexts_dict[chunk_id].setdefault("matched_entities", []).extend(result.get('matched_entities', []))
-                        contexts_dict[chunk_id]["matched_entities"] = list(set(contexts_dict[chunk_id]["matched_entities"]))
-            
-            except Exception as e:
-                logger.error(f"Graph traversal failed: {e}", exc_info=True)
-            
-            # Related mentions query
-            related_query = """
-            MATCH (e1:Entity)-[:RELATED_TO]-(e2:Entity)<-[:MENTIONS]-(c:Chunk)
-            WHERE toLower(e1.name) IN $entity_names AND NOT toLower(e2.name) IN $entity_names
-            OPTIONAL MATCH (c)<-[:CONTAINS]-(d:Document)
-            RETURN c.id AS chunk_id, c.content AS content, c.page_num AS page_num,
-                   d.id AS source_document, 'related' AS type, 0.5 AS score, 
-                   collect(DISTINCT e2.name) AS matched_entities,
-                   collect(DISTINCT e1.name) AS query_entities
-            LIMIT $limit
-            """
-            
-            try:
-                related_results = graph.query(related_query, params={
-                    "entity_names": lower_entities,
-                    "limit": k_graph
-                })
-                
-                # Process related results
-                for idx, result in enumerate(related_results):
-                    chunk_id = result.get('chunk_id')
-                    if not chunk_id: continue
-                    
-                    if chunk_id not in contexts_dict:
-                        contexts_dict[chunk_id] = {
-                            "source": "graph_related",
-                            "rank": idx,
-                            "score": result.get('score', 0.5),
-                            "chunk_id": chunk_id,
-                            "content": result.get('content', ''),
-                            "page_num": result.get('page_num'),
-                            "source_document": result.get('source_document', 'unknown'),
-                            "matched_entities": result.get('matched_entities', [])
-                        }
-                    else:
-                        contexts_dict[chunk_id].setdefault("matched_entities", []).extend(result.get('matched_entities', []))
-                        contexts_dict[chunk_id]["matched_entities"] = list(set(contexts_dict[chunk_id]["matched_entities"]))
-            
-            except Exception as e:
-                logger.error(f"Graph traversal failed: {e}", exc_info=True)
-
-        # Convert dict back to list
-        contexts_list = list(contexts_dict.values())
-
-        # Optional: Sort final list by score (descending), prioritizing vector score if available?
-        contexts_list.sort(key=lambda x: x.get('score', 0), reverse=True)
-
-        logger.info(f"Context gathering completed in {time.time() - start_time:.2f} seconds. Found {len(contexts_list)} unique relevant contexts.")
-        return contexts_list
-
+        vector_results = vector_store.similarity_search(question, k=k_vector)
+        vector_context = "\n\n".join([doc.page_content for doc in vector_results])
     except Exception as e:
-        logger.error(f"Error getting query context: {str(e)}", exc_info=True)
-        return list(contexts_dict.values()) # Return whatever was collected
+        logging.error(f"Error in vector retrieval: {str(e)}")
+        vector_context = "Vector retrieval failed."
 
+    # 2. Get graph-based context with specialized queries
+    graph_context = ""
+    try:
+        # Determine query type based on question content
+        query_type = determine_query_type(question)
+        
+        # Get graph results using specialized queries
+        graph_results = run_specialized_query(graph, query_type, question, k_graph)
+        
+        # Format graph results
+        if graph_results:
+            graph_context = format_graph_results(graph_results, query_type)
+        else:
+            graph_context = "No relevant graph connections found."
+    except Exception as e:
+        logging.error(f"Error in graph retrieval: {str(e)}")
+        graph_context = "Graph retrieval failed."
+
+    # Return combined contexts
+    return {
+        "vector_context": vector_context,
+        "graph_context": graph_context,
+        "query_type": query_type
+    }
+
+def determine_query_type(question: str) -> str:
+    """Determine query type based on question content"""
+    question_lower = question.lower()
+    
+    # Material properties
+    if any(term in question_lower for term in ["material", "polymer", "plastic", "pa", "pbt"]):
+        return "material"
+    
+    # Physical dimensions
+    elif any(term in question_lower for term in ["height", "length", "width", "dimension", "mm", "size"]):
+        return "dimension"
+    
+    # Gender/connectors
+    elif any(term in question_lower for term in ["gender", "male", "female", "connector"]):
+        return "gender"
+    
+    # Cavities/rows
+    elif any(term in question_lower for term in ["cavity", "cavities", "row", "rows"]):
+        return "cavity"
+    
+    # Sealing
+    elif any(term in question_lower for term in ["seal", "sealing", "waterproof", "ip"]):
+        return "sealing"
+    
+    # Color
+    elif any(term in question_lower for term in ["color", "colour", "black", "white"]):
+        return "color"
+    
+    # Temperature
+    elif any(term in question_lower for term in ["temperature", "thermal", "heat", "degree"]):
+        return "temperature"
+    
+    # Default
+    return "general"
+
+def run_specialized_query(graph: Any, query_type: str, question: str, limit: int) -> List[Dict[str, Any]]:
+    """Run specialized graph query based on query type"""
+    
+    # Material-specific query
+    if query_type == "material":
+        query = """
+        MATCH (doc:Document)-[:CONTAINS]->(chunk:Chunk)
+        WHERE chunk.text CONTAINS 'material' OR chunk.text CONTAINS 'polymer' OR chunk.text CONTAINS 'plastic'
+        WITH doc, chunk
+        OPTIONAL MATCH (chunk)-[:HAS_ENTITY]->(material:Entity)
+        WHERE material.type IN ['MATERIAL', 'CHEMICAL', 'SUBSTANCE'] OR 
+              material.text CONTAINS 'PA' OR 
+              material.text CONTAINS 'PBT' OR
+              material.text CONTAINS 'Nylon'
+        RETURN doc.title as document, chunk.page as page, chunk.text as context, 
+               material.text as entity_text, material.type as entity_type,
+               exists((chunk)-[:HAS_ENTITY]->(material)) as has_material
+        ORDER BY has_material DESC, material.text
+        LIMIT $limit
+        """
+    
+    # Dimension-specific query
+    elif query_type == "dimension":
+        query = """
+        MATCH (doc:Document)-[:CONTAINS]->(chunk:Chunk)
+        WHERE chunk.text CONTAINS 'mm' OR chunk.text CONTAINS 'dimension' OR 
+              chunk.text CONTAINS 'height' OR chunk.text CONTAINS 'width' OR chunk.text CONTAINS 'length'
+        WITH doc, chunk
+        OPTIONAL MATCH (chunk)-[:HAS_ENTITY]->(dimension:Entity)
+        WHERE dimension.type = 'QUANTITY' OR dimension.text CONTAINS 'mm'
+        RETURN doc.title as document, chunk.page as page, chunk.text as context,
+               dimension.text as entity_text, dimension.type as entity_type,
+               exists((chunk)-[:HAS_ENTITY]->(dimension)) as has_dimension
+        ORDER BY has_dimension DESC
+        LIMIT $limit
+        """
+    
+    # Gender-specific query
+    elif query_type == "gender":
+        query = """
+        MATCH (doc:Document)-[:CONTAINS]->(chunk:Chunk)
+        WHERE chunk.text CONTAINS 'male' OR chunk.text CONTAINS 'female' OR chunk.text CONTAINS 'gender'
+        WITH doc, chunk
+        OPTIONAL MATCH (chunk)-[:HAS_ENTITY]->(gender:Entity)
+        WHERE gender.text IN ['male', 'female'] OR gender.text CONTAINS 'connector'
+        RETURN doc.title as document, chunk.page as page, chunk.text as context,
+               gender.text as entity_text, gender.type as entity_type,
+               exists((chunk)-[:HAS_ENTITY]->(gender)) as has_gender_info
+        ORDER BY has_gender_info DESC
+            LIMIT $limit
+            """
+            
+    # Cavity-specific query
+    elif query_type == "cavity":
+        query = """
+        MATCH (doc:Document)-[:CONTAINS]->(chunk:Chunk)
+        WHERE chunk.text CONTAINS 'cavity' OR chunk.text CONTAINS 'cavities' OR 
+              chunk.text CONTAINS 'row' OR chunk.text CONTAINS 'rows'
+        WITH doc, chunk
+        OPTIONAL MATCH (chunk)-[:HAS_ENTITY]->(num:Entity)
+        WHERE num.type = 'CARDINAL' OR num.type = 'QUANTITY'
+        RETURN doc.title as document, chunk.page as page, chunk.text as context,
+               num.text as entity_text, num.type as entity_type,
+               exists((chunk)-[:HAS_ENTITY]->(num)) as has_number
+        ORDER BY has_number DESC
+        LIMIT $limit
+        """
+    
+    # Sealing-specific query
+    elif query_type == "sealing":
+        query = """
+        MATCH (doc:Document)-[:CONTAINS]->(chunk:Chunk)
+        WHERE chunk.text CONTAINS 'seal' OR chunk.text CONTAINS 'waterproof' OR 
+              chunk.text CONTAINS 'IP' OR chunk.text CONTAINS 'protection'
+        WITH doc, chunk
+        OPTIONAL MATCH (chunk)-[:HAS_ENTITY]->(seal:Entity)
+        WHERE seal.text CONTAINS 'seal' OR seal.text CONTAINS 'IP'
+        RETURN doc.title as document, chunk.page as page, chunk.text as context,
+               seal.text as entity_text, seal.type as entity_type,
+               exists((chunk)-[:HAS_ENTITY]->(seal)) as has_sealing
+        ORDER BY has_sealing DESC
+        LIMIT $limit
+        """
+    
+    # Color-specific query
+    elif query_type == "color":
+        query = """
+        MATCH (doc:Document)-[:CONTAINS]->(chunk:Chunk)
+        WHERE chunk.text CONTAINS 'color' OR chunk.text CONTAINS 'colour' OR 
+              chunk.text CONTAINS 'black' OR chunk.text CONTAINS 'white'
+        WITH doc, chunk
+        OPTIONAL MATCH (chunk)-[:HAS_ENTITY]->(color:Entity)
+        WHERE color.type = 'COLOR' OR color.text IN ['black', 'white', 'red', 'blue', 'green', 'yellow']
+        RETURN doc.title as document, chunk.page as page, chunk.text as context,
+               color.text as entity_text, color.type as entity_type,
+               exists((chunk)-[:HAS_ENTITY]->(color)) as has_color
+        ORDER BY has_color DESC
+        LIMIT $limit
+        """
+    
+    # Temperature-specific query
+    elif query_type == "temperature":
+        query = """
+        MATCH (doc:Document)-[:CONTAINS]->(chunk:Chunk)
+        WHERE chunk.text CONTAINS 'temperature' OR chunk.text CONTAINS '°C' OR 
+              chunk.text CONTAINS 'thermal' OR chunk.text CONTAINS 'heat'
+        WITH doc, chunk
+        OPTIONAL MATCH (chunk)-[:HAS_ENTITY]->(temp:Entity)
+        WHERE temp.type = 'QUANTITY' OR temp.text CONTAINS '°C' OR temp.text CONTAINS 'temperature'
+        RETURN doc.title as document, chunk.page as page, chunk.text as context,
+               temp.text as entity_text, temp.type as entity_type,
+               exists((chunk)-[:HAS_ENTITY]->(temp)) as has_temp
+        ORDER BY has_temp DESC
+        LIMIT $limit
+        """
+    
+    # General query for other types
+    else:
+        query = """
+        MATCH (doc:Document)-[:CONTAINS]->(chunk:Chunk)
+        WHERE chunk.text CONTAINS $keyword
+        WITH doc, chunk
+        OPTIONAL MATCH (chunk)-[:HAS_ENTITY]->(entity:Entity)
+        RETURN doc.title as document, chunk.page as page, chunk.text as context,
+               entity.text as entity_text, entity.type as entity_type,
+               exists((chunk)-[:HAS_ENTITY]->(entity)) as has_entity
+        ORDER BY has_entity DESC
+            LIMIT $limit
+            """
+            
+    # Extract keywords from question for general search
+    keywords = extract_keywords(question)
+    keyword = keywords[0] if keywords else ""
+    
+    # Run the query with parameters
+    return graph.run(query, keyword=keyword, limit=limit).data()
+
+def extract_keywords(text: str) -> List[str]:
+    """Extract important keywords from text"""
+    # Simple keyword extraction
+    common_words = {'the', 'and', 'is', 'of', 'what', 'how', 'can', 'does', 'do', 'a', 'an', 'in', 'for', 'to', 'from'}
+    words = [word.lower() for word in text.split() if word.lower() not in common_words and len(word) > 2]
+    return words[:3]  # Return top 3 keywords
+
+def format_graph_results(results: List[Dict[str, Any]], query_type: str) -> str:
+    """Format graph results into readable context"""
+    if not results:
+        return "No relevant graph connections found."
+    
+    formatted_context = "GRAPH DATABASE RESULTS:\n\n"
+    
+    for result in results:
+        doc = result.get('document', 'Unknown document')
+        page = result.get('page', 'Unknown page')
+        context = result.get('context', 'No context available')
+        entity_text = result.get('entity_text', None)
+        entity_type = result.get('entity_type', None)
+        
+        formatted_context += f"Document: {doc} (Page: {page})\n"
+        formatted_context += f"Context: {context}\n"
+        
+        if entity_text and entity_type:
+            formatted_context += f"Entity: {entity_text} (Type: {entity_type})\n"
+        
+        formatted_context += "\n" + "-"*50 + "\n\n"
+    
+    return formatted_context
 
 def answer_question(
     question: str,
     api_key: str,
-    contexts: List[Dict[str, Any]],
-    neo4j_uri: str,
-    neo4j_username: str,
-    neo4j_password: str,
-    model_name: str = "deepseek-chat",  # Changed from Fireworks model
-    max_context_tokens: int = 3000 # Estimate max tokens for context to avoid exceeding limit
+    contexts: Dict[str, Any],
+    neo4j_uri: str = None,
+    neo4j_username: str = None,
+    neo4j_password: str = None
 ) -> Dict[str, Any]:
-    """Generate answer based on retrieved contexts using DeepSeek API."""
-    logger.info(f"Generating answer for question: {question}")
-    start_time = time.time()
-
-    if not contexts:
-        logger.warning("No context provided to answer the question.")
-        return {
-            "answer": "I couldn't find any relevant information in the knowledge base to answer this question.",
-            "processing_time": time.time() - start_time,
-            "contexts_used": 0,
-            "context_sources": []
-         }
-
+    """Generate an answer using the given contexts
+    
+    Args:
+        question: User question
+        api_key: API key for LLM
+        contexts: Combined contexts from vector and graph sources
+        neo4j_uri: Neo4j connection URI
+        neo4j_username: Neo4j username
+        neo4j_password: Neo4j password
+        
+    Returns:
+        Dictionary with answer and metadata
+    """
     try:
-        # --- Prepare Context ---
-        # Sort contexts (e.g., by score if available, or vector first) - assuming already sorted by get_query_context
-        compiled_context = ""
-        current_token_count = 0 # Rough estimate
-        contexts_included = 0
-        contexts_details = []  # Store details about included contexts
+        from fireworks.client import Fireworks
+        client = Fireworks(api_key=api_key)
+        
+        # Create an enhanced prompt that explicitly asks the model to use both vector and graph data
+        vector_context = contexts.get("vector_context", "")
+        graph_context = contexts.get("graph_context", "")
+        query_type = contexts.get("query_type", "general")
+        
+        # Build a specialized system prompt based on the query type
+        system_prompt = get_specialized_system_prompt(query_type)
+        
+        user_prompt = f"""
+Please analyze the following information and answer this question:
 
-        for ctx in contexts:
-            # Format context entry - include key details like source, doc, page
-            ctx_entry = f"Source Type: {ctx['source']}\n"
-            if ctx.get('source_document'): ctx_entry += f"Document: {ctx['source_document']}\n"
-            if ctx.get('page_num') is not None: ctx_entry += f"Page: {ctx['page_num']}\n"
-            if ctx.get('matched_entities'): ctx_entry += f"Matched Entities: {', '.join(ctx['matched_entities'])}\n"
-            ctx_entry += f"Content: {ctx.get('content', '')}\n\n"
+QUESTION: {question}
 
-            # Store details for response
-            context_detail = {
-                "source_type": ctx['source'],
-                "document": ctx.get('source_document', 'Unknown'),
-                "page": ctx.get('page_num'),
-                "matched_entities": ctx.get('matched_entities', [])
-            }
-            contexts_details.append(context_detail)
+I've retrieved information from two sources to help you:
 
-            # Estimate token count (simple space split, adjust if using a proper tokenizer)
-            entry_token_estimate = len(ctx_entry.split())
-            if current_token_count + entry_token_estimate <= max_context_tokens:
-                compiled_context += ctx_entry
-                current_token_count += entry_token_estimate
-                contexts_included += 1
-            else:
-                logger.warning(f"Stopping context inclusion after {contexts_included} entries due to estimated token limit ({max_context_tokens}).")
-                break # Stop adding contexts if limit is reached
+1. VECTOR SEARCH RESULTS (text similarity):
+{vector_context}
 
-        if not compiled_context:
-             logger.error("Context compilation resulted in empty string, possibly due to token limits or empty contexts.")
-             # Handle case where even the first context is too long?
-             return {"error": "Failed to compile context within token limits."}
+2. KNOWLEDGE GRAPH TRAVERSAL RESULTS (entity relationships):
+{graph_context}
 
-
-        # --- Retrieve Graph Schema ---
-        try:
-            graph = Neo4jGraph(url=neo4j_uri, username=neo4j_username, password=neo4j_password)
-            # graph.schema is a property that fetches the schema string
-            schema_text = graph.schema
-            logger.debug("Retrieved graph schema for prompt.")
-        except Exception as e:
-            logger.warning(f"Could not retrieve graph schema: {e}. Proceeding without it.")
-            schema_text = "Schema information unavailable."
-
-        # --- Formulate Prompt ---
-        prompt = f"""You are an AI assistant answering questions based on information retrieved from a knowledge base.
-Use the following context information and graph schema to answer the question accurately and concisely.
-Cite the source document and page number if available and relevant using bracket notation (e.g., [Document: report.pdf, Page: 5]).
-If the information is not available in the provided context, state that clearly.
-
-**Graph Schema:**
-{schema_text}
-
-**Retrieved Context:**
-{compiled_context}
-
-**Question:**
-{question}
-
-**Answer:**
+When answering, please:
+1. Consider information from BOTH sources
+2. Explicitly mention relationships found in the knowledge graph when relevant
+3. Cite the specific document and page number for your claims
+4. Present your reasoning step-by-step before giving the final answer
+5. Format the final answer clearly and concisely
 """
 
-        # --- Call DeepSeek LLM ---
-        # Initialize OpenAI client with DeepSeek base URL
-        client = OpenAI(api_key=api_key, base_url="https://api.deepseek.com", timeout=60.0)
-        
+        # Generate response with the enhanced prompts
         response = client.chat.completions.create(
-            model=model_name,
+            model="accounts/fireworks/models/firefunction-v2",
             messages=[
-                {"role": "system", "content": "You are a helpful assistant answering questions based on provided context."},
-                {"role": "user", "content": prompt}
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt}
             ],
-            max_tokens=1024, # Max tokens for the *answer*
-            temperature=0.1 # Low temperature for factual answers
+            temperature=0.1,
+            max_tokens=1000
         )
 
-        # --- Process Response ---
-        if response.choices and len(response.choices) > 0:
             answer = response.choices[0].message.content.strip()
-        else:
-            raise ValueError("No response content found in DeepSeek API response.")
-
-        # Basic cleaning (less aggressive than before)
-        cleaned_answer = answer # Keep most LLM formatting unless problematic
-
-        # Count the number of contexts from each source type
-        source_type_counts = {}
-        for i in range(contexts_included):
-            source_type = contexts_details[i]["source_type"]
-            source_type_counts[source_type] = source_type_counts.get(source_type, 0) + 1
         
-        # Format the context source information for display
-        context_source_details = []
-        for source_type, count in source_type_counts.items():
-            context_source_details.append(f"{source_type} ({count})")
-        
-        # Extract all unique entity matches for display
-        all_entities = []
-        for i in range(contexts_included):
-            all_entities.extend(contexts_details[i].get("matched_entities", []))
-        unique_entities = list(set(all_entities))
-
-        result = {
-            "answer": cleaned_answer,
-            "processing_time": time.time() - start_time,
-            "contexts_used": contexts_included,
-            "context_sources": list(set([c['source'] for c in contexts[:contexts_included]])),  # Sources actually used
-            "context_source_counts": source_type_counts,  # Count of each source type
-            "context_details": contexts_details[:contexts_included],  # Detailed info about each context
-            "matched_entities": unique_entities  # All entities matched in used contexts
+        # Return the result
+        return {
+            "answer": answer,
+            "contexts": contexts
         }
-
-        logger.info(f"Answer generated in {time.time() - start_time:.2f} seconds")
-        logger.info(f"Context sources used: {', '.join(context_source_details)}")
-        if unique_entities:
-            logger.info(f"Entities matched: {', '.join(unique_entities)}")
-        return result
-
+        
     except Exception as e:
-        logger.error(f"Error generating answer: {str(e)}", exc_info=True)
+        logging.error(f"Error generating answer: {str(e)}")
         return {"error": f"Error generating answer: {str(e)}"}
+
+def get_specialized_system_prompt(query_type: str) -> str:
+    """Get specialized system prompt based on query type"""
+    
+    base_prompt = "You are a technical documentation analysis expert specialized in automotive connectors and components."
+    
+    if query_type == "material":
+        return base_prompt + """
+Focus on material properties and classifications. When analyzing materials:
+1. Identify the primary material composition (PA, PBT, etc.)
+2. Note any additives or special properties (glass-filled, flame retardant)
+3. Correlate the material with its standard abbreviation (e.g., Nylon = PA)
+4. Distinguish between housing materials and other component materials
+5. Present the evidence from both text matches and graph relationships
+"""
+    
+    elif query_type == "dimension":
+        return base_prompt + """
+Focus on physical dimensions and measurements. When analyzing dimensions:
+1. Extract precise measurements in millimeters
+2. Distinguish between height, width, and length values
+3. Note which component the dimensions apply to (housing, terminal, etc.)
+4. Identify any tolerances or ranges provided
+5. Present the evidence from both text matches and graph relationships
+"""
+    
+    elif query_type == "gender":
+        return base_prompt + """
+Focus on connector gender and mating properties. When analyzing gender:
+1. Explicitly state whether the connector is male or female
+2. Note any keying or polarization features related to gender
+3. Identify mating connector information if available
+4. Link the gender to the specific component (housing, terminal)
+5. Present the evidence from both text matches and graph relationships
+"""
+    
+    # Add more specialized prompts for other query types
+    
+    else:
+        return base_prompt + """
+Analyze the information provided from both vector search results and knowledge graph traversal.
+Pay particular attention to relationships between entities in the graph data.
+Present your reasoning step-by-step, citing specific documents and page numbers.
+"""
 
 # Example Usage (Illustrative - adapt to your main script)
 # if __name__ == '__main__':

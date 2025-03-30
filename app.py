@@ -214,7 +214,7 @@ def run_extraction(
     api_key: str,
     graph_data: Dict[str, Any]
 ) -> Dict[str, Any]:
-    """Run an extraction based on the selected option
+    """Run an extraction based on the selected option with enhanced graph traversal
     
     Args:
         extraction_option: Type of extraction to run
@@ -284,9 +284,20 @@ def run_extraction(
             prompt = HV_QUALIFIED_PROMPT
         else:
             raise ValueError(f"Unknown extraction option: {extraction_option}")
+        
+        # Enhanced extraction with specific graph traversal instructions
+        logger.info(f"Running extraction for: {extraction_option}")
+        
+        # Add extraction-specific instructions to the prompt
+        augmented_prompt = f"""EXTRACTION TYPE: {extraction_option}
 
-        # Use the same Q&A function but with the extraction prompt
-        result = ask_graph_rag(prompt, api_key, graph_data)
+{prompt}
+
+IMPORTANT: Use the graph database to find connections between entities for this extraction.
+"""
+        
+        # Use the enhanced Q&A function with the extraction prompt
+        result = ask_graph_rag(augmented_prompt, api_key, graph_data)
         return result
 
     except Exception as e:
