@@ -32,9 +32,42 @@ from components.results import (
 
 # Import prompts
 from prompts.extraction_prompts import (
+    # Material Properties
     MATERIAL_PROMPT,
     MATERIAL_NAME_PROMPT,
-    GENDER_PROMPT
+
+    # Physical / Mechanical Attributes
+    PULL_TO_SEAT_PROMPT,
+    GENDER_PROMPT,
+    HEIGHT_MM_PROMPT,
+    LENGTH_MM_PROMPT,
+    WIDTH_MM_PROMPT,
+    NUMBER_OF_CAVITIES_PROMPT,
+    NUMBER_OF_ROWS_PROMPT,
+    MECHANICAL_CODING_PROMPT,
+    COLOUR_PROMPT,
+    COLOUR_CODING_PROMPT,
+
+    # Sealing & Environmental
+    WORKING_TEMPERATURE_PROMPT,
+    HOUSING_SEAL_PROMPT,
+    WIRE_SEAL_PROMPT,
+    SEALING_PROMPT,
+    SEALING_CLASS_PROMPT,
+
+    # Terminals & Connections
+    CONTACT_SYSTEMS_PROMPT,
+    TERMINAL_POSITION_ASSURANCE_PROMPT,
+    CONNECTOR_POSITION_ASSURANCE_PROMPT,
+    CLOSED_CAVITIES_PROMPT,
+
+    # Assembly & Type
+    PRE_ASSEMBLED_PROMPT,
+    CONNECTOR_TYPE_PROMPT,
+    SET_KIT_PROMPT,
+
+    # Specialized Attributes
+    HV_QUALIFIED_PROMPT
 )
 
 # Initialize dotenv for environment variables
@@ -205,6 +238,50 @@ def run_extraction(
             prompt = MATERIAL_NAME_PROMPT
         elif extraction_option == "Connector Gender":
             prompt = GENDER_PROMPT
+        elif extraction_option == "Pull To Seat":
+            prompt = PULL_TO_SEAT_PROMPT
+        elif extraction_option == "Height (mm)":
+            prompt = HEIGHT_MM_PROMPT
+        elif extraction_option == "Length (mm)":
+            prompt = LENGTH_MM_PROMPT
+        elif extraction_option == "Width (mm)":
+            prompt = WIDTH_MM_PROMPT
+        elif extraction_option == "Number of Cavities":
+            prompt = NUMBER_OF_CAVITIES_PROMPT
+        elif extraction_option == "Number of Rows":
+            prompt = NUMBER_OF_ROWS_PROMPT
+        elif extraction_option == "Mechanical Coding":
+            prompt = MECHANICAL_CODING_PROMPT
+        elif extraction_option == "Colour":
+            prompt = COLOUR_PROMPT
+        elif extraction_option == "Colour Coding":
+            prompt = COLOUR_CODING_PROMPT
+        elif extraction_option == "Working Temperature":
+            prompt = WORKING_TEMPERATURE_PROMPT
+        elif extraction_option == "Housing Seal":
+            prompt = HOUSING_SEAL_PROMPT
+        elif extraction_option == "Wire Seal":
+            prompt = WIRE_SEAL_PROMPT
+        elif extraction_option == "Sealing":
+            prompt = SEALING_PROMPT
+        elif extraction_option == "Sealing Class":
+            prompt = SEALING_CLASS_PROMPT
+        elif extraction_option == "Contact Systems":
+            prompt = CONTACT_SYSTEMS_PROMPT
+        elif extraction_option == "Terminal Position Assurance":
+            prompt = TERMINAL_POSITION_ASSURANCE_PROMPT
+        elif extraction_option == "Connector Position Assurance":
+            prompt = CONNECTOR_POSITION_ASSURANCE_PROMPT
+        elif extraction_option == "Closed Cavities":
+            prompt = CLOSED_CAVITIES_PROMPT
+        elif extraction_option == "Pre-Assembled":
+            prompt = PRE_ASSEMBLED_PROMPT
+        elif extraction_option == "Connector Type":
+            prompt = CONNECTOR_TYPE_PROMPT
+        elif extraction_option == "Set Kit":
+            prompt = SET_KIT_PROMPT
+        elif extraction_option == "HV Qualified":
+            prompt = HV_QUALIFIED_PROMPT
         else:
             raise ValueError(f"Unknown extraction option: {extraction_option}")
 
@@ -226,7 +303,34 @@ def run_all_extractions(api_key: str, graph_data: Dict[str, Any]) -> Dict[str, D
     Returns:
         Dictionary of extraction results by type
     """
-    extraction_types = ["Material Filling", "Material Name", "Connector Gender"]
+    extraction_types = [
+        "Material Filling", 
+        "Material Name", 
+        "Connector Gender",
+        "Pull To Seat",
+        "Height (mm)",
+        "Length (mm)",
+        "Width (mm)",
+        "Number of Cavities",
+        "Number of Rows",
+        "Mechanical Coding",
+        "Colour",
+        "Colour Coding",
+        "Working Temperature",
+        "Housing Seal",
+        "Wire Seal",
+        "Sealing",
+        "Sealing Class",
+        "Contact Systems",
+        "Terminal Position Assurance",
+        "Connector Position Assurance",
+        "Closed Cavities",
+        "Pre-Assembled",
+        "Connector Type",
+        "Set Kit",
+        "HV Qualified"
+    ]
+    
     results = {}
     
     with st.status("Running extractions...", expanded=True) as status:
