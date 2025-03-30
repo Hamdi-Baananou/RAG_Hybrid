@@ -486,11 +486,6 @@ def main():
         with st.expander("📁 Uploaded Documents", expanded=True):
             display_file_info(pdf_paths)
     
-    # Show graph statistics if available
-    if st.session_state.graph_data:
-        with st.expander("📊 Graph Statistics", expanded=True):
-            display_graph_stats(st.session_state.graph_data["statistics"])
-    
     # Display extraction results if available
     if st.session_state.processing_complete and st.session_state.extraction_results:
         display_extraction_table(st.session_state.extraction_results)
