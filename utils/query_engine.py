@@ -365,35 +365,37 @@ def answer_question(
     question: str,
     api_key: str,
     contexts: Dict[str, Any],
-    neo4j_uri: str = None,
-    neo4j_username: str = None,
-    neo4j_password: str = None
+    model: str = "deepseek-chat", # Added model parameter for flexibility
+    max_retries: int = 3,         # Added retry logic
+    initial_backoff: float = 2.0  # Added retry logic
+    # Removed neo4j_uri, neo4j_username, neo4j_password as they are not used here
 ) -> Dict[str, Any]:
-    """Generate an answer using the given contexts
-    
+    """Generate an answer using the given contexts with DeepSeek LLM.
+
     Args:
         question: User question
-        api_key: API key for LLM
+        api_key: API key for DeepSeek LLM
         contexts: Combined contexts from vector and graph sources
-        neo4j_uri: Neo4j connection URI
-        neo4j_username: Neo4j username
-        neo4j_password: Neo4j password
-        
+        model: The DeepSeek model to use (e.g., "deepseek-chat").
+        max_retries: Maximum number of retries for the API call.
+        initial_backoff: Initial backoff time for retries.
+
     Returns:
-        Dictionary with answer and metadata
+        Dictionary with answer and metadata or error message.
     """
+    start_time = time.time() # Start timing
     try:
-        from fireworks.client import Fireworks
-        client = Fireworks(api_key=api_key)
-        
+        # Initialize OpenAI client with DeepSeek base URL
+        client = OpenAI(api_key=api_key, base_url="https://api.deepseek.com", timeout=60.0) # Increased timeout
+
         # Create an enhanced prompt that explicitly asks the model to use both vector and graph data
-        vector_context = contexts.get("vector_context", "")
-        graph_context = contexts.get("graph_context", "")
+        vector_context = contexts.get("vector_context", "No vector context available.")
+        graph_context = contexts.get("graph_context", "No graph context available.")
         query_type = contexts.get("query_type", "general")
-        
+
         # Build a specialized system prompt based on the query type
         system_prompt = get_specialized_system_prompt(query_type)
-        
+
         user_prompt = f"""
 Please analyze the following information and answer this question:
 
@@ -408,35 +410,81 @@ I've retrieved information from two sources to help you:
 {graph_context}
 
 When answering, please:
-1. Consider information from BOTH sources
-2. Explicitly mention relationships found in the knowledge graph when relevant
-3. Cite the specific document and page number for your claims
-4. Present your reasoning step-by-step before giving the final answer
-5. Format the final answer clearly and concisely
+1. Carefully synthesize information from BOTH the vector search results and the knowledge graph details.
+2. Explicitly mention key entities, relationships, or properties found specifically in the KNOWLEDGE GRAPH RESULTS when relevant to the question.
+3. If possible, cite the source document and page number for your claims based on the provided context.
+4. Structure your response clearly. Start with a direct answer, then provide the supporting details and reasoning based *only* on the provided contexts.
+5. If the contexts do not contain enough information to answer the question fully, state that clearly. Do not invent information.
 """
+        # Retry logic for API call
+        current_retry = 0
+        backoff_time = initial_backoff
+        while current_retry < max_retries:
+            try:
+                # Small delay before API call
+                time.sleep(random.uniform(0.1, 0.3))
 
-        # Generate response with the enhanced prompts
-        response = client.chat.completions.create(
-            model="accounts/fireworks/models/firefunction-v2",
-            messages=[
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": user_prompt}
-            ],
-            temperature=0.1,
-            max_tokens=1000
-        )
+                # Generate response with the enhanced prompts using DeepSeek
+                response = client.chat.completions.create(
+                    model=model, # Use the specified DeepSeek model
+                    messages=[
+                        {"role": "system", "content": system_prompt},
+                        {"role": "user", "content": user_prompt}
+                    ],
+                    temperature=0.0, # Lower temperature for more deterministic answers
+                    max_tokens=1500 # Adjusted token limit if needed
+                )
 
-            answer = response.choices[0].message.content.strip()
-        
-        # Return the result
+                if response.choices and len(response.choices) > 0:
+                    answer = response.choices[0].message.content.strip()
+                    end_time = time.time() # End timing
+                    processing_time = end_time - start_time
+                    logger.info(f"Answer generated successfully in {processing_time:.2f}s")
+
+                    # Return the result
+                    return {
+                        "answer": answer,
+                        "contexts": contexts, # Return original contexts for reference
+                        "processing_time": processing_time
+                    }
+                else:
+                    logger.warning("DeepSeek LLM answer generation returned no choices.")
+                    # Optional: Retry if no choices are returned? Depends on API behavior.
+                    # For now, treat as failure for this attempt.
+                    raise ValueError("LLM response contained no choices.")
+
+
+            except Exception as e:
+                current_retry += 1
+                if current_retry >= max_retries:
+                    logger.error(f"DeepSeek LLM answer generation failed after {max_retries} retries: {e}")
+                    end_time = time.time()
+                    return {
+                        "error": f"Error generating answer after multiple retries: {str(e)}",
+                        "processing_time": end_time - start_time
+                        }
+                else:
+                    wait_time = backoff_time + random.uniform(0, backoff_time / 2) # Add jitter
+                    logger.warning(f"DeepSeek LLM answer generation attempt {current_retry} failed ({e}). Retrying in {wait_time:.2f}s...")
+                    time.sleep(wait_time)
+                    backoff_time = min(backoff_time * 2, 60.0) # Exponential backoff capped at 60s
+
+        # This part should ideally not be reached if the loop logic is correct
+        logger.error("Answer generation failed after exhausting retries (logic error).")
+        end_time = time.time()
         return {
-            "answer": answer,
-            "contexts": contexts
-        }
-        
+            "error": "Answer generation failed after exhausting retries.",
+            "processing_time": end_time - start_time
+            }
+
+
     except Exception as e:
-        logging.error(f"Error generating answer: {str(e)}")
-        return {"error": f"Error generating answer: {str(e)}"}
+        end_time = time.time()
+        logger.error(f"Critical error during answer generation setup: {str(e)}", exc_info=True)
+        return {
+            "error": f"Critical error during answer generation setup: {str(e)}",
+            "processing_time": end_time - start_time
+            }
 
 def get_specialized_system_prompt(query_type: str) -> str:
     """Get specialized system prompt based on query type"""
@@ -488,65 +536,70 @@ Present your reasoning step-by-step, citing specific documents and page numbers.
 #     NEO4J_URI = "bolt://localhost:7687"
 #     NEO4J_USERNAME = "neo4j"
 #     NEO4J_PASSWORD = "your_password"
-#     FIREWORKS_API_KEY = "your_fireworks_api_key"
+#     DEEPSEEK_API_KEY = "your_deepseek_api_key" # <<< Use DeepSeek key
 #     from langchain_community.embeddings import OllamaEmbeddings # Or your chosen embedding model
+#     import os # Make sure os is imported if using environment variables
 
 #     # --- Initialization ---
 #     try:
+#         # Get DeepSeek API Key (Example using environment variable)
+#         api_key = os.getenv("DEEPSEEK_API_KEY", DEEPSEEK_API_KEY) # Fallback to variable if env var not set
+#         if not api_key or "your_" in api_key:
+#              raise ValueError("DEEPSEEK_API_KEY not configured properly.")
+
 #         graph_db = Neo4jGraph(url=NEO4J_URI, username=NEO4J_USERNAME, password=NEO4J_PASSWORD)
-#         embedding_model = OllamaEmbeddings(model="nomic-embed-text") # Example
-#         vector_idx = Neo4jVector(
-#             embedding=embedding_model,
-#             url=NEO4J_URI,
-#             username=NEO4J_USERNAME,
-#             password=NEO4J_PASSWORD,
-#             index_name="chunk_embeddings", # Match the name used in setup
-#             node_label="Chunk",
-#             text_node_property="content",
-#             embedding_node_property="embedding"
-#         )
-#         logger.info("Neo4j connection and vector store initialized.")
+#         # Configure embedding model as needed
+#         # embedding_model = OllamaEmbeddings(model="nomic-embed-text")
+#         # Using placeholder for embeddings if not directly needed in this example run
+#         # In a real scenario, initialize your vector store properly:
+#         # vector_idx = Neo4jVector(...)
+#         vector_idx_placeholder = "Initialize your Neo4jVector instance here" # Placeholder
+
+#         logger.info("Neo4j connection initialized.") # Simplified message
 #     except Exception as init_error:
 #         logger.critical(f"Initialization failed: {init_error}", exc_info=True)
 #         exit(1)
 
 #     # --- Query ---
-#     test_question = "What are the key specifications for the BK 1-WAY housing?"
+#     test_question = "What is the primary material used for the connector housing described in document X page Y?" # More specific example
 
+#     # Ensure vector_store is correctly initialized before passing
+#     # For demonstration, we pass the placeholder. Replace with your actual vector_idx
 #     retrieved_contexts = get_query_context(
 #         question=test_question,
-#         vector_store=vector_idx,
-#         graph=graph_db,
-#         api_key=FIREWORKS_API_KEY,
+#         vector_store=vector_idx_placeholder, # Replace with actual vector_idx
+#         graph=graph_db.query, # Pass the query execution method
+#         api_key=api_key,      # Pass the DeepSeek API key
 #         k_vector=3,
 #         k_graph=5,
-#         use_llm_extraction=True # Use LLM for entity extraction
+#         use_llm_extraction=True
 #     )
 
 #     print("\n--- Retrieved Contexts ---")
-#     for i, ctx in enumerate(retrieved_contexts):
-#         print(f"Context {i+1}:")
-#         print(f"  Source: {ctx.get('source')}, Score: {ctx.get('score', 'N/A')}")
-#         print(f"  Chunk ID: {ctx.get('chunk_id')}")
-#         print(f"  Document: {ctx.get('source_document')}, Page: {ctx.get('page_num')}")
-#         print(f"  Matched Entities: {ctx.get('matched_entities')}")
-#         print(f"  Content: {ctx.get('content', '')[:150]}...") # Print snippet
-#         print("-" * 10)
+#     print(json.dumps(retrieved_contexts, indent=2)) # Print contexts for inspection
 
 
-#     if retrieved_contexts:
-#         final_answer = answer_question(
+#     if retrieved_contexts and "error" not in retrieved_contexts:
+#         final_answer_data = answer_question(
 #             question=test_question,
-#             api_key=FIREWORKS_API_KEY,
-#             contexts=retrieved_contexts,
-#             neo4j_uri=NEO4J_URI,
-#             neo4j_username=NEO4J_USERNAME,
-#             neo4j_password=NEO4J_PASSWORD
+#             api_key=api_key, # Pass DeepSeek key
+#             contexts=retrieved_contexts
+#             # No need to pass Neo4j credentials here anymore
 #         )
 #         print("\n--- Final Answer ---")
-#         print(f"Answer: {final_answer.get('answer', final_answer.get('error', 'No answer generated.'))}")
-#         print(f"Processing Time: {final_answer.get('processing_time', 0):.2f}s")
-#         print(f"Contexts Used: {final_answer.get('contexts_used', 0)}")
-#         print(f"Context Sources: {final_answer.get('context_sources', [])}")
+#         if "answer" in final_answer_data:
+#             print(f"Answer:\n{final_answer_data['answer']}")
+#         elif "error" in final_answer_data:
+#             print(f"Error: {final_answer_data['error']}")
+#         else:
+#             print("No answer or error generated.")
+
+#         print(f"\nProcessing Time: {final_answer_data.get('processing_time', 'N/A'):.2f}s")
+#         # Example of accessing contexts if needed (they are returned in final_answer_data)
+#         # print("\nContexts Used:")
+#         # print(json.dumps(final_answer_data.get('contexts',{}), indent=2))
+
 #     else:
-#         print("\nNo context retrieved, skipping answer generation.")
+#         print("\nContext retrieval failed or returned empty, skipping answer generation.")
+#         if "error" in retrieved_contexts:
+#             print(f"Retrieval Error: {retrieved_contexts['error']}")
