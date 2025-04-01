@@ -178,7 +178,7 @@ def ask_graph_rag(
             raise ValueError("Graph data not initialized. Process PDFs first.")
 
         if not api_key:
-            raise ValueError("Missing Fireworks API key")
+            raise ValueError("Missing DeepSeek API key")
 
         # Display processing status
         with st.spinner("Retrieving context and generating answer..."):
@@ -186,7 +186,7 @@ def ask_graph_rag(
             contexts = get_query_context(
                 question,
                 graph_data["vector_store"],
-                graph_data["graph"],
+                graph_data["graph"].query,
                 api_key,
                 k_vector=3,
                 k_graph=5,
@@ -197,10 +197,7 @@ def ask_graph_rag(
             result = answer_question(
                 question,
                 api_key,
-                contexts,
-                graph_data["neo4j_uri"],
-                graph_data["neo4j_username"],
-                graph_data["neo4j_password"]
+                contexts
             )
 
             return result

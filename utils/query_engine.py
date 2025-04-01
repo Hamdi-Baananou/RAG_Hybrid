@@ -328,7 +328,7 @@ def run_specialized_query(graph: Any, query_type: str, question: str, limit: int
     keyword = keywords[0] if keywords else ""
     
     # Run the query with parameters
-    return graph.run(query, keyword=keyword, limit=limit).data()
+    return graph.query(query, params={"keyword": keyword, "limit": limit}).data()
 
 def extract_keywords(text: str) -> List[str]:
     """Extract important keywords from text"""
